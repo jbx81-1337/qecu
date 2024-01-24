@@ -1,0 +1,45 @@
+project: Emulator Config
+input:
+  format: elf
+  path: ./test/ecu.elf
+    
+mem_map:
+  - from: 0x0
+    size: 0x10000000
+    flags: '*'
+
+  - from: 0x50000000
+    size: 0x00100000
+    flags: '*'
+
+  - from: 0x60000000
+    size: 0x00100000
+    flags: RWX  
+  
+  - from: 0x70000000
+    size: 0x00010000
+    flags: RWX
+
+  - from: 0x80000000
+    size: 0x10000000
+    flags: RWX
+      
+  - from: 0xa0000000
+    size: 0x10000000
+    flags: RWX 
+
+  - from: 0xd0000000
+    size: 0x00010000
+    flags: RWX 
+
+registers:
+  - name: 'A0'
+    value:  0x1337
+
+# boot:
+#   begin: 0x80003d10
+#   until: 0x80003f2a
+#   timout: 0x00
+#   count: 0x00
+
+init_script: ./init.rhai
