@@ -1,10 +1,10 @@
 mod qecu;
 mod utils;
-use std::{fs, sync::{Arc, RwLock}, borrow::{BorrowMut, Borrow}};
-use crate::qecu::{emulator::{self}, interceptor::Interceptor};
-use elf::file;
+use std::{fs, sync::{Arc, RwLock}};
+use crate::qecu::{emulator::{self}, interceptor::{self, Interceptor}};
 use rhai::Engine;
 use rhai::Scope;
+use unicorn_engine::Unicorn;
 
 fn main() {
     let mut _engine = Engine::new();
@@ -13,29 +13,28 @@ fn main() {
     let wf = utils::workflow::Workflow::new(config);
     print!("{}\n", wf.project);
     let file_path = wf.init_script.clone();
-    let mut emulator = emulator::Emulator::new(wf);
+    let emulator = emulator::Emulator::new(wf);
     let init_script: String = fs::read_to_string(file_path).expect("Cannot open file");
-    let mut me = Arc::new(RwLock::new(emulator));
-    {       
-            let mut scope;
-            {
-                let mut locked = me.write().unwrap();
-                let mut emulator_data = locked.get_data_mut();
-                scope = emulator_data.scope.clone();
-                scope.push("emulator", me.clone());
-            }
-            let mut engine = Engine::new();
-            engine.register_type::<Interceptor>().
-                register_fn("new_interceptor", Interceptor::new).
-                register_fn("read_register", Interceptor::read_register).
-                register_fn("write_register", Interceptor::write_register).
-                register_fn("read_memory", Interceptor::read_memory).
-                register_fn("write_memory", Interceptor::write_memory);
-        let r = engine.run_with_scope(&mut scope, &init_script);
+    let uc_handle = {
+        emulator.uc.get_handle()
+    };
+    let me = Arc::new(RwLock::new(emulator));
+    {
+        let engine = interceptor::make_engine();
+        let mut scope: Scope;
+        {
+            let mut locked = me.try_write().expect("[main] Cannot lock emulator\n");      
+            let ast_script = engine.compile(init_script.clone()).expect("[engine::compile] Cannot compile script\n");
+            scope = Scope::new();
+            locked.ast = ast_script.clone();
+            scope.push("Interceptor", Interceptor::new(me.clone(), uc_handle, ast_script.clone()));
+        }
+        engine.run_with_scope(&mut scope, &init_script).expect("[engine::run_with_scope] Error running init script.\n");
+        {
+            me.try_write().unwrap().scope = scope.clone();
+        }
     }
-    // {
-    //     me.write().unwrap().emu_start(0x00, 0x00, 0x00, 0x00).unwrap();
-    //     print!("here");
-    // }
+    let mut uc = Unicorn::try_from(uc_handle).unwrap();
+    uc.emu_start(0x80003d10, 0xFFFFFFFF, 0x00, 0x00).unwrap();
 
 }

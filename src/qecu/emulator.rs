@@ -1,21 +1,25 @@
-use rhai::{Engine, Scope};
+use std::collections::HashMap;
+use rhai::{Engine, Scope, AST};
 use unicorn_engine::{Unicorn, RegisterTRICORE};
 use unicorn_engine::unicorn_const::{Arch, Mode, Permission};
 use crate::utils::{self, workflow::Workflow};
+use std::sync::RwLock;
 
 pub struct Emulator <'a>{
-    pub engine: Engine,
-    pub scope: Scope<'a>
+    pub engine: RwLock<Engine>,
+    pub scope: Scope<'a>,
+    pub ast: AST,
+    pub hookmap: RwLock<HashMap<String, RwLock<HashMap<u64, String>>>>,
+    pub uc: Unicorn<'a, ()>
 }
 
 impl<'a> Emulator <'a>{
 
-    pub fn new(workflow: Workflow) -> Unicorn<'static, Emulator<'a>>{
-        let emu = Emulator { engine: Engine::new(), scope: Scope::new()};
+    pub fn new(workflow: Workflow) -> Emulator<'a>{
         let input = workflow.input;
         let registers = &workflow.registers;
         let code_sections = utils::loader::Loader::new(&input.format, &input.path);
-        let mut unicorn: Unicorn<'_, Emulator> = Unicorn::new_with_data(Arch::TRICORE, Mode::LITTLE_ENDIAN, emu).expect("failed to initialize Unicorn instance");
+        let mut unicorn: Unicorn<'_, ()> = Unicorn::new(Arch::TRICORE, Mode::LITTLE_ENDIAN).expect("failed to initialize Unicorn instance");
         let uc = &mut unicorn;
         for mem_map in workflow.mem_map {
             let mut perms = Permission::NONE;
@@ -46,7 +50,7 @@ impl<'a> Emulator <'a>{
                 .expect(format!("[unicorn::reg_write] Failed to write register {} with data {:#01x}\n", register.name, register.value).as_str());
             println!("[unicorn::reg_write] register: {} value: {:#01x}", register.name, register.value);
         }
-        return unicorn;
+        return Emulator { engine: RwLock::new(Engine::new()), scope: Scope::new(), hookmap: RwLock::new(HashMap::new()), ast: AST::empty(), uc: unicorn};
     }
 
     pub fn get_register(reg_name: &String) -> RegisterTRICORE {
