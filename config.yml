@@ -30,7 +30,11 @@ mem_map:
 
   - from: 0xd0000000
     size: 0x00010000
-    flags: RWX 
+    flags: RWX
+
+  - from: 0xf0000000
+    size: 0x0f000000
+    flags: RWX
 
 registers:
   - name: 'A0'
@@ -43,3 +47,4 @@ registers:
 #   count: 0x00
 
 init_script: ./init.rhai
+sleigh_path: ../rust-sleigh/vendor/share/sleigh/specfiles/Ghidra/Processors

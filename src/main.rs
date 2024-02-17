@@ -13,6 +13,7 @@ fn main() {
     let wf = utils::workflow::Workflow::new(config);
     print!("{}\n", wf.project);
     let file_path = wf.init_script.clone();
+    let sleigh_path = wf.sleigh_path.clone();
     let emulator = emulator::Emulator::new(wf);
     let init_script: String = fs::read_to_string(file_path).expect("Cannot open file");
     let uc_handle = {
@@ -27,7 +28,7 @@ fn main() {
             let ast_script = engine.compile(init_script.clone()).expect("[engine::compile] Cannot compile script\n");
             scope = Scope::new();
             locked.ast = ast_script.clone();
-            scope.push("Interceptor", Interceptor::new(me.clone(), uc_handle, ast_script.clone()));
+            scope.push("Interceptor", Interceptor::new(me.clone(), uc_handle, ast_script.clone(), sleigh_path));
         }
         engine.run_with_scope(&mut scope, &init_script).expect("[engine::run_with_scope] Error running init script.\n");
         {

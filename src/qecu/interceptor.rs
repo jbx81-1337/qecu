@@ -2,20 +2,37 @@ use rhai::{Engine, Scope, AST};
 use unicorn_engine::Unicorn;
 use crate::{emulator::Emulator, qecu::interceptor};
 use std::{collections::HashMap, os::raw::c_void, sync::{Arc, RwLock}};
-
+use rust_sleigh::SleighDecompiler;
 
 #[derive(Clone)]
 pub struct Interceptor <'a>{
     emulator: Arc<RwLock<Emulator<'a>>>,
     uc_handle: *mut c_void,
+    disassembler: SleighDecompiler,
     ast: AST
 }
 
 impl <'a> Interceptor <'static> {
-    pub fn new(emulator: Arc<RwLock<Emulator<'a>>>, uc_handle: *mut c_void, ast: AST) -> Interceptor <'a>{
-        return Interceptor {emulator: emulator, uc_handle: uc_handle, ast: ast};
+    pub fn new(emulator: Arc<RwLock<Emulator<'a>>>, uc_handle: *mut c_void, ast: AST, sleigh_path: String) -> Interceptor <'a>{
+        return Interceptor {
+            emulator: emulator, 
+            uc_handle: uc_handle, 
+            ast: ast, 
+            disassembler: SleighDecompiler::new(sleigh_path, 
+                                                String::from("/tricore/data/languages/tricore.sla"), 
+                                                String::from("/tricore/data/languages/tricore.pspec"))
+        };
     }
 
+    pub fn disas(&mut self, address: i64, size: i64) -> String {
+        
+        let code = self.read_memory(address, size);
+        let address: u64 = address.try_into().unwrap();
+        let size: u32 = size.try_into().unwrap();
+        let mut disas = self.disassembler.disas(code, address, size);
+        disas.pop();
+        return disas;
+    }
     
     pub fn read_register(&mut self, reg_name: String) -> i64{
         let emulator = Unicorn::try_from(self.uc_handle).unwrap();
@@ -34,7 +51,7 @@ impl <'a> Interceptor <'static> {
     pub fn read_memory(&mut self, address: i64, size: i64) -> Vec<u8>{
         let emulator = Unicorn::try_from(self.uc_handle).unwrap();
         let ret = emulator.mem_read_as_vec(address.try_into().unwrap(), size.try_into().unwrap())
-            .expect("[interceptor::write_register] Cannot write register\n");
+            .expect("[interceptor::read_memory] Cannot write register\n");
         return ret;
     }
 
@@ -43,7 +60,7 @@ impl <'a> Interceptor <'static> {
         let data: &[u8] = &data; // c: &[u8]
         let mut emulator = Unicorn::try_from(self.uc_handle).unwrap();
         emulator.mem_write(address.try_into().unwrap(), data)
-            .expect("[interceptor::write_register] Cannot write register\n");
+            .expect("[interceptor::write_memory] Cannot write register\n");
         return 0;
     }
 
@@ -75,6 +92,8 @@ impl <'a> Interceptor <'static> {
             let mut scope = Scope::new();
             scope.set_value("Interceptor", intercept.clone());
             let ast = ast.clone();
+            let addr: i64 = addr.try_into().unwrap();
+            let size: i64 = size.try_into().unwrap();
             eng.call_fn::<i64>(&mut scope, &ast, fn_name, (addr, size)).unwrap();
             ()
         };
@@ -91,6 +110,7 @@ pub fn make_engine() -> Engine{
         register_fn("write_register", Interceptor::write_register).
         register_fn("read_memory", Interceptor::read_memory).
         register_fn("write_memory", Interceptor::write_memory).
-        register_fn("add_code_hook", Interceptor::add_code_hook);
+        register_fn("add_code_hook", Interceptor::add_code_hook).
+        register_fn("disas", Interceptor::disas);
     return engine;
 }

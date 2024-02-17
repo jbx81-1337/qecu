@@ -12,3 +12,5 @@ serde_yaml = "0.9"
 unicorn-engine = "2.0.0"
 rhai = "*"
 lazy_static = "1.4.0"
+
+rust-sleigh = { path = "../rust-sleigh" }

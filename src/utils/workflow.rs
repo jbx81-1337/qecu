@@ -34,7 +34,8 @@ pub struct Workflow {
     pub mem_map: Vec<WorkflowMemMap>,
     pub registers: Vec<WorkflowRegister>,
     // pub boot: WorkflowBoot,
-    pub init_script: String
+    pub init_script: String,
+    pub sleigh_path: String
 }
 
 impl Workflow {
