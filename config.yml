@@ -9,15 +9,15 @@ mem_map:
     flags: '*'
 
   - from: 0x50000000
-    size: 0x00100000
+    size: 0x10000000
     flags: '*'
 
   - from: 0x60000000
-    size: 0x00100000
+    size: 0x10000000
     flags: RWX  
   
   - from: 0x70000000
-    size: 0x00010000
+    size: 0x10000000
     flags: RWX
 
   - from: 0x80000000
@@ -29,11 +29,11 @@ mem_map:
     flags: RWX 
 
   - from: 0xd0000000
-    size: 0x00010000
+    size: 0x10000000
     flags: RWX
 
   - from: 0xf0000000
-    size: 0x0f000000
+    size: 0x10000000
     flags: RWX
 
 registers:

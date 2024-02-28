@@ -1,6 +1,27 @@
-fn code_hook(address, size) {
-    let disas = Interceptor.disas(address, size);
-    print(`0x${address.to_hex()}:> ${disas}`);
+/*
+ * IfxCpu_waitEvent: Hook, just skip to ret
+ */
+Interceptor.add_hook("CODE", 0x800019de, 4, |Interceptor, addr, size| {
+    print("> IfxCpu_waitEvent. Skipping");
+    Interceptor.write_register("D2", 0);
+    Interceptor.set_pc(0x80001a58);
     return 0;
-}
-Interceptor.add_code_hook("code_hook");
+});
+
+Interceptor.add_hook("CODE", 0x80000200, 4, |Interceptor, addr, size| {
+    print("> WaitTime, Waiting 1 second...");
+    Interceptor.sleep(1000);
+    Interceptor.set_pc(0x800002e2);
+    return 0;
+});
+
+Interceptor.add_hook("CODE", 0x80003f4c, 4, |Interceptor, addr, size| {
+    print("> SoftwareStartup finished, core0_start...");
+    return 0;
+});
+
+Interceptor.add_hook("CODE", 0x80003eac, 0x10000000, |Interceptor, addr, size| {
+    let disas = Interceptor.disas(addr, size);
+    print(`${addr.to_hex()}> ${disas}`);
+    return 0;
+});

@@ -1,56 +1,116 @@
-use std::collections::HashMap;
-use rhai::{Engine, Scope, AST};
+use rust_sleigh::SleighDecompiler;
 use unicorn_engine::{Unicorn, RegisterTRICORE};
 use unicorn_engine::unicorn_const::{Arch, Mode, Permission};
 use crate::utils::{self, workflow::Workflow};
-use std::sync::RwLock;
+use std::sync::Arc;
 
+use super::interceptor::Interceptor;
+
+#[derive(Clone)]
 pub struct Emulator <'a>{
-    pub engine: RwLock<Engine>,
-    pub scope: Scope<'a>,
-    pub ast: AST,
-    pub hookmap: RwLock<HashMap<String, RwLock<HashMap<u64, String>>>>,
-    pub uc: Unicorn<'a, ()>
+    pub wf: Workflow,
+    uc: Arc<Unicorn<'a, ()>>,
+    pub disas: SleighDecompiler,
 }
 
-impl<'a> Emulator <'a>{
+impl<'a> Emulator <'static>{
 
-    pub fn new(workflow: Workflow) -> Emulator<'a>{
-        let input = workflow.input;
-        let registers = &workflow.registers;
-        let code_sections = utils::loader::Loader::new(&input.format, &input.path);
+    pub fn new(workflow: Workflow) -> Emulator<'a> {
         let mut unicorn: Unicorn<'_, ()> = Unicorn::new(Arch::TRICORE, Mode::LITTLE_ENDIAN).expect("failed to initialize Unicorn instance");
-        let uc = &mut unicorn;
-        for mem_map in workflow.mem_map {
-            let mut perms = Permission::NONE;
-            for chr in mem_map.flags.to_uppercase().chars() {
-                let new_permission_feature = match chr {
-                    'R' => Permission::READ,
-                    'W' => Permission::WRITE,
-                    'X' => Permission::EXEC,
-                    '*' => Permission::ALL,
-                      _ => Permission::NONE
-                };
-                perms = perms | new_permission_feature;
+        {
+            let workflow = workflow.clone();
+            let input = workflow.input;
+            let registers = &workflow.registers;
+            let code_sections = utils::loader::Loader::new(&input.format, &input.path);
+            let uc = &mut unicorn;
+            for mem_map in workflow.mem_map {
+                let mut perms = Permission::NONE;
+                for chr in mem_map.flags.to_uppercase().chars() {
+                    let new_permission_feature = match chr {
+                        'R' => Permission::READ,
+                        'W' => Permission::WRITE,
+                        'X' => Permission::EXEC,
+                        '*' => Permission::ALL,
+                        _ => Permission::NONE
+                    };
+                    perms = perms | new_permission_feature;
+                }
+                uc.mem_map(mem_map.from, mem_map.size, perms)
+                    .expect(format!("[unicorn::mem_map] Failed to write data at {:#01x} of size {}\n", mem_map.from, mem_map.size).as_str());
+                println!("[unicorn::mem_map] address: {:#01x} size: {}", mem_map.from, mem_map.size);
             }
-            uc.mem_map(mem_map.from, mem_map.size, perms)
-                .expect(format!("[unicorn::mem_map] Failed to write data at {:#01x} of size {}\n", mem_map.from, mem_map.size).as_str());
-            println!("[unicorn::mem_map] address: {:#01x} size: {}", mem_map.from, mem_map.size);
-        }
+        
+            for code_section in code_sections {
+                uc.mem_write(code_section.address, &code_section.data)
+                    .expect(format!("[unicorn::mem_wirte] Failed to write data at {:#01x} of size {}\n", code_section.address, code_section.size).as_str());
+                println!("[unicorn::mem_write] address: {:#01x} size: {}", code_section.address, code_section.size);
+            }
 
-
-        for code_section in code_sections {
-            uc.mem_write(code_section.address, &code_section.data)
-                .expect(format!("[unicorn::mem_wirte] Failed to write data at {:#01x} of size {}\n", code_section.address, code_section.size).as_str());
-            println!("[unicorn::mem_write] address: {:#01x} size: {}", code_section.address, code_section.size);
+            for register in registers {
+                uc.reg_write(Self::get_register(&register.name), register.value)
+                    .expect(format!("[unicorn::reg_write] Failed to write register {} with data {:#01x}\n", register.name, register.value).as_str());
+                println!("[unicorn::reg_write] register: {} value: {:#01x}", register.name, register.value);
+            }
         }
+        let sleigh_path = {
+            workflow.sleigh_path.clone()
+        };
+        return Emulator {
+            wf: workflow, 
+            uc: Arc::new(unicorn),
+            disas: SleighDecompiler::new(sleigh_path,
+                    String::from("/tricore/data/languages/tricore.sla"), 
+                    String::from("/tricore/data/languages/tricore.pspec"))
+        };
+    }
 
-        for register in registers {
-            uc.reg_write(Self::get_register(&register.name), register.value)
-                .expect(format!("[unicorn::reg_write] Failed to write register {} with data {:#01x}\n", register.name, register.value).as_str());
-            println!("[unicorn::reg_write] register: {} value: {:#01x}", register.name, register.value);
-        }
-        return Emulator { engine: RwLock::new(Engine::new()), scope: Scope::new(), hookmap: RwLock::new(HashMap::new()), ast: AST::empty(), uc: unicorn};
+    pub fn mut_uc(&self) -> Unicorn<'_, ()>{
+        return Unicorn::try_from(self.uc.get_handle()).unwrap();
+    }
+    pub fn read_register(&self, reg_name: String) -> u64 {
+        let ret = self.uc.reg_read(Emulator::get_register(&reg_name))
+            .expect("[emulator::write_register] Cannot read register\n");
+        return ret;
+    }
+
+    pub fn write_register(&self, reg_name: String, value: u64) -> u64 {
+        self.mut_uc().reg_write(Emulator::get_register(&reg_name), value.try_into().unwrap())
+            .expect("[emulator::write_register] Cannot write register\n");
+        return 0;
+    }
+
+    pub fn read_memory(&self, address: u64, size: usize) -> Vec<u8>{
+        let ret = self.uc.mem_read_as_vec(address, size)
+            .expect("[emulator::read_memory] Cannot write register\n");
+        return ret;
+    }
+
+    pub fn write_memory(&self, address: u64, data: Vec<u8>) -> u64{
+        let data = &data; // b: &Vec<u8>
+        let data: &[u8] = &data; // c: &[u8]
+        self.mut_uc().mem_write(address, data)
+            .expect("[emulator::write_memory] Cannot write register\n");
+        return 0;
+    }
+
+    pub fn on_code_hook(&self, _addr: u64, _size: u32) {
+        // dbg!("[on_code_hook] {} {}\n", addr, size);
+    }
+
+    pub fn run(&mut self) {
+        let uc_handle = {
+            self.uc.get_handle()
+        };
+        let init_script = self.wf.init_script.clone();
+        let mut inter = Interceptor::new(self.clone(), init_script);
+        inter.init();
+        let mut uc = Unicorn::try_from(uc_handle).unwrap();
+        let callback = move |_uc: &mut Unicorn<'_, ()>, addr: u64, size: u32| {
+            self.on_code_hook(addr, size);
+            inter.on_code_hook(addr, size);
+        };
+        uc.add_code_hook(0, 0xFFFFFFFF, callback).expect("[emulator::run] Cannot install default code_hook");
+        uc.emu_start(0x80003d10, 0xFFFFFFFF, 0x00, 0x00).unwrap();
     }
 
     pub fn get_register(reg_name: &String) -> RegisterTRICORE {
@@ -88,7 +148,7 @@ impl<'a> Emulator <'a>{
             "D13" => RegisterTRICORE::D13,
             "D14" => RegisterTRICORE::D14,
             "D15" => RegisterTRICORE::D15,
-
+            
             "BIV" => RegisterTRICORE::BIV,
             "FCX" => RegisterTRICORE::FCX,
             _ => RegisterTRICORE::A0

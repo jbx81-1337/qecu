@@ -1,25 +1,25 @@
 use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowInput {
     pub format: String,
     pub path: String
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowMemMap {
     pub from: u64,
     pub size: usize,
     pub flags: String
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowRegister {
     pub name: String,
     pub value: u64
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowBoot {
     pub begin: u64,
     pub until: u64,
@@ -27,7 +27,7 @@ pub struct WorkflowBoot {
     pub count: u64
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Workflow {
     pub project: String,
     pub input: WorkflowInput,
