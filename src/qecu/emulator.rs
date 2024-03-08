@@ -2,20 +2,41 @@ use rust_sleigh::SleighDecompiler;
 use unicorn_engine::{Unicorn, RegisterTRICORE};
 use unicorn_engine::unicorn_const::{Arch, Mode, Permission};
 use crate::utils::{self, workflow::Workflow};
-use std::sync::Arc;
-
+use std::os::raw::c_void;
+use std::sync::{Arc, Mutex};
+use std::fmt;
 use super::interceptor::Interceptor;
 
-#[derive(Clone)]
+struct UcWrapper <'a>{
+    uc: Unicorn<'a, ()>
+}
+unsafe impl Send for UcWrapper<'static>{}
+impl <'a> fmt::Debug for UcWrapper<'static> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "UcWrapper")
+    }
+}
+
+struct SleighDecompilerWrapper {
+    disas: SleighDecompiler
+}
+unsafe impl Send for SleighDecompilerWrapper{}
+impl fmt::Debug for SleighDecompilerWrapper {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SleighDecompilerWrapper")
+    }
+}
+#[derive(Debug, Clone)]
 pub struct Emulator <'a>{
-    pub wf: Workflow,
-    uc: Arc<Unicorn<'a, ()>>,
-    pub disas: SleighDecompiler,
+    pub wf: Arc<Workflow>,
+    uc: Arc<Mutex<UcWrapper<'static>>>,
+    disas: Arc<Mutex<SleighDecompilerWrapper>>,
+    pub interceptor: Arc<Mutex<Option<Interceptor<'a>>>>
 }
 
 impl<'a> Emulator <'static>{
 
-    pub fn new(workflow: Workflow) -> Emulator<'a> {
+    pub fn new(workflow: Workflow) -> Emulator<'static> {
         let mut unicorn: Unicorn<'_, ()> = Unicorn::new(Arch::TRICORE, Mode::LITTLE_ENDIAN).expect("failed to initialize Unicorn instance");
         {
             let workflow = workflow.clone();
@@ -55,20 +76,32 @@ impl<'a> Emulator <'static>{
         let sleigh_path = {
             workflow.sleigh_path.clone()
         };
-        return Emulator {
-            wf: workflow, 
-            uc: Arc::new(unicorn),
-            disas: SleighDecompiler::new(sleigh_path,
-                    String::from("/tricore/data/languages/tricore.sla"), 
-                    String::from("/tricore/data/languages/tricore.pspec"))
+        let init_script = {
+            workflow.init_script.clone()
         };
+
+        Emulator {
+            wf: Arc::new(workflow), 
+            uc: Arc::new(Mutex::new(UcWrapper { uc: unicorn })),
+            disas: 
+                Arc::new(
+                    Mutex::new(SleighDecompilerWrapper { 
+                        disas: SleighDecompiler::new(sleigh_path,
+                                                        String::from("/tricore/data/languages/tricore.sla"),
+                                                        String::from("/tricore/data/languages/tricore.pspec"))
+                                                    }
+                                                )
+                                            ),
+            interceptor: Arc::new(Mutex::new(Some(Interceptor::new(init_script))))
+        }
     }
 
     pub fn mut_uc(&self) -> Unicorn<'_, ()>{
-        return Unicorn::try_from(self.uc.get_handle()).unwrap();
+        return Unicorn::try_from(self.get_uc_handle()).unwrap();
     }
+    
     pub fn read_register(&self, reg_name: String) -> u64 {
-        let ret = self.uc.reg_read(Emulator::get_register(&reg_name))
+        let ret = self.mut_uc().reg_read(Emulator::get_register(&reg_name))
             .expect("[emulator::write_register] Cannot read register\n");
         return ret;
     }
@@ -80,7 +113,7 @@ impl<'a> Emulator <'static>{
     }
 
     pub fn read_memory(&self, address: u64, size: usize) -> Vec<u8>{
-        let ret = self.uc.mem_read_as_vec(address, size)
+        let ret = self.mut_uc().mem_read_as_vec(address, size)
             .expect("[emulator::read_memory] Cannot write register\n");
         return ret;
     }
@@ -93,24 +126,48 @@ impl<'a> Emulator <'static>{
         return 0;
     }
 
-    pub fn on_code_hook(&self, _addr: u64, _size: u32) {
-        // dbg!("[on_code_hook] {} {}\n", addr, size);
+    pub fn set_pc(&self, addr: u64) {
+        self.mut_uc().set_pc(addr).expect("[emulator::set_pc] Cannot set pc");
     }
 
-    pub fn run(&mut self) {
-        let uc_handle = {
-            self.uc.get_handle()
-        };
-        let init_script = self.wf.init_script.clone();
-        let mut inter = Interceptor::new(self.clone(), init_script);
-        inter.init();
-        let mut uc = Unicorn::try_from(uc_handle).unwrap();
+    pub fn on_code_hook(&self, _addr: u64, _size: u32) {
+        let mut lock = self.interceptor.lock();
+        let intercept = lock.as_mut().unwrap().as_mut().unwrap();
+        intercept.on_code_hook(_addr, _size);
+    }
+
+    pub fn get_uc_handle(&self) -> *mut c_void {
+        self.uc.lock().unwrap().uc.get_handle()
+    }
+
+    pub fn emit(&self, event_type: String, msg: String) {
+        let mut lock = self.interceptor.lock();
+        let intercept = lock.as_mut().unwrap().as_mut().unwrap();
+        intercept.emit(event_type, msg);
+    }
+
+    pub fn run(&self) {
+        {
+            let mut lock = self.interceptor.lock();
+            let intercept = lock.as_mut().unwrap().as_mut().unwrap();
+            intercept.set_emulator(self.clone());
+            intercept.init();
+            drop(lock);
+        }
+
+        let mut uc = self.mut_uc();   
         let callback = move |_uc: &mut Unicorn<'_, ()>, addr: u64, size: u32| {
             self.on_code_hook(addr, size);
-            inter.on_code_hook(addr, size);
         };
         uc.add_code_hook(0, 0xFFFFFFFF, callback).expect("[emulator::run] Cannot install default code_hook");
         uc.emu_start(0x80003d10, 0xFFFFFFFF, 0x00, 0x00).unwrap();
+    }
+
+    pub fn disas(&self, code: Vec<u8>, addr: u64, size: u32) -> String{
+        let disas = {
+            self.disas.lock().unwrap().disas.clone()
+        };
+        return disas.disas(code, addr, size);
     }
 
     pub fn get_register(reg_name: &String) -> RegisterTRICORE {

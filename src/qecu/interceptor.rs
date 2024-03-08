@@ -1,9 +1,10 @@
 use rhai::{Engine, Scope, AST};
+use serde::{Deserialize, Serialize};
 use std::{fs, thread::sleep, time};
-
+use std::fmt;
 use super::emulator::Emulator;
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct CodeHook {
     begin: u64,
     end: u64,
@@ -11,16 +12,26 @@ pub struct CodeHook {
     content: String
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+pub struct EventCallback {
+    event_type: String,
+    code_type: u8,
+    content: String
+}
+
 #[derive(Clone)]
 pub struct Interceptor <'a>{
-    emulator: Emulator<'a>,
+    emulator: Option<Emulator<'static>>,
     ast: AST,
     scope: Scope<'a>,
     code_hooks: Vec<CodeHook>,
+    on_events: Vec<EventCallback>
 }
 
+unsafe impl Send for Interceptor<'static>{}
+
 impl <'a> Interceptor <'static> {
-    pub fn new(emulator: Emulator<'a>, init_script: String) -> Interceptor <'a>{
+    pub fn new(init_script: String) -> Interceptor <'a>{
         let ast = {
             let  eng = make_engine();
             let script_code = fs::read_to_string(init_script).expect("[interceptor::new] Cannot open init_script");
@@ -29,13 +40,18 @@ impl <'a> Interceptor <'static> {
         };
 
         return Interceptor {
-            emulator: emulator, 
+            emulator: None,
             ast: ast,
             scope: Scope::new(),
             code_hooks: Vec::new(),
+            on_events: Vec::new()
         };
     }
 
+    pub fn set_emulator(&mut self, emulator: Emulator<'static>) {
+        self.emulator = Some(emulator);
+    }
+    
     pub fn init(&mut self) {
         let _engine = make_engine();
         let mut scope = self.scope.clone();
@@ -43,6 +59,7 @@ impl <'a> Interceptor <'static> {
         _engine.run_ast_with_scope(&mut scope, &self.ast).expect("[engine::run_with_scope] Error running init script.\n");
         let intercept = scope.get_value::<Interceptor>("Interceptor").unwrap();
         self.code_hooks = intercept.code_hooks;
+        self.on_events = intercept.on_events;
         self.scope = scope.clone();
     }
 
@@ -50,25 +67,25 @@ impl <'a> Interceptor <'static> {
         let code = self.read_memory(address, size);
         let address: u64 = address.try_into().unwrap();
         let size: u32 = size.try_into().unwrap();
-        let mut disas = self.emulator.disas.disas(code, address, size);
+        let mut disas = self.emulator.as_ref().unwrap().disas(code, address, size);
         disas.pop();
         return disas;
     }
     
     pub fn read_register(&mut self, reg_name: String) -> i64{
-        self.emulator.read_register(reg_name).try_into().unwrap()
+        self.emulator.as_ref().unwrap().read_register(reg_name).try_into().unwrap()
     }
 
     pub fn write_register(&mut self, reg_name: String, value: i64) -> i64 {
-        self.emulator.write_register(reg_name, value.try_into().unwrap()).try_into().unwrap()
+        self.emulator.as_ref().unwrap().write_register(reg_name, value.try_into().unwrap()).try_into().unwrap()
     }
 
     pub fn read_memory(&mut self, address: i64, size: i64) -> Vec<u8>{
-        self.emulator.read_memory(address.try_into().unwrap(), size.try_into().unwrap())
+        self.emulator.as_ref().unwrap().read_memory(address.try_into().unwrap(), size.try_into().unwrap())
     }
 
     pub fn write_memory(&mut self, address: i64, data: Vec<u8>) -> i64 {
-        self.emulator.write_memory(address.try_into().unwrap(), data).try_into().unwrap()
+        self.emulator.as_ref().unwrap().write_memory(address.try_into().unwrap(), data).try_into().unwrap()
     }
 
     pub fn add_cb_hook(&mut self, hook_type: String, address: i64, size: i64, callback: rhai::FnPtr) {
@@ -105,19 +122,39 @@ impl <'a> Interceptor <'static> {
 
     }
 
+    pub fn on_cb_event(&mut self, event_type: String, callback: rhai::FnPtr) {
+        let fn_name = callback.fn_name().to_string();
+        let evt = EventCallback {
+            event_type: event_type,
+            code_type: 1,
+            content: fn_name
+        };
+        self.on_events.push(evt);
+
+    }
+
+    pub fn on_event(&mut self, event_type: String, function_name: String) {
+        let evt = EventCallback {
+            event_type: event_type,
+            code_type: 1,
+            content: function_name
+        };
+        self.on_events.push(evt);
+    }
+
     pub fn sleep(&mut self, millis: i64) {
         let millis = time::Duration::from_millis(millis.try_into().unwrap());
         sleep(millis);
     }
 
     pub fn set_pc(&mut self, addr: i64) {
-        self.emulator.mut_uc().set_pc(addr.try_into().unwrap()).expect("[interceptor::set_pc] Cannot set pc");
+        self.emulator.as_mut().unwrap().set_pc(addr.try_into().unwrap());
     }
 
     pub fn on_code_hook(&mut self, addr: u64, size: u32) {
         let addr_rhai: i64 = addr.try_into().unwrap();
         let size_rhai: i64 = size.try_into().unwrap();
-        let code_hooks = self.code_hooks.clone();
+        let code_hooks = &self.code_hooks;
         let size: u64 = size.try_into().unwrap();
         for code_hook in code_hooks {
             if addr >= code_hook.begin && (addr + size) <= code_hook.end {
@@ -137,6 +174,36 @@ impl <'a> Interceptor <'static> {
             }
         }
     }
+
+    pub fn emit(&self, event_type: String, msg: String) {
+        for event in &self.on_events {
+            if event.event_type == event_type {
+                let mut _engine = make_engine();
+                let mut _scope = self.scope.clone();
+                let ast = self.ast.clone_functions_only();
+                let msg = msg.clone();
+                match event.code_type {
+                    0 => {
+                        _engine.call_fn::<i64>(&mut _scope, &ast, &event.content, (event_type.clone(), msg))
+                            .expect(format!("[interceptor::on_code_hook] Cannot call function {} ", event.content).as_str());
+                    }
+                    1 => { _engine.call_fn::<i64>(&mut _scope, &ast, &event.content, (self.clone(), event_type.clone(), msg))
+                            .expect(format!("[interceptor::on_code_hook] Cannot call function {} ", event.content).as_str());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    pub fn get_code_hooks(&self) -> Vec<CodeHook> {
+        self.code_hooks.clone()
+    }
+
+    pub fn get_event_hooks(&self) -> Vec<EventCallback> {
+        self.on_events.clone()
+    }
+
 }
 
 pub fn make_engine() -> Engine{
@@ -149,8 +216,16 @@ pub fn make_engine() -> Engine{
         register_fn("write_memory", Interceptor::write_memory).
         register_fn("add_hook", Interceptor::add_hook).
         register_fn("add_hook", Interceptor::add_cb_hook).
+        register_fn("on_event", Interceptor::on_event).
+        register_fn("on_event", Interceptor::on_cb_event).
         register_fn("disas", Interceptor::disas).
         register_fn("sleep", Interceptor::sleep).
         register_fn("set_pc", Interceptor::set_pc);
     return engine;
+}
+
+impl <'a> fmt::Debug for Interceptor<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "UcWrapper")
+    }
 }

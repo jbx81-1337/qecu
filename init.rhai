@@ -1,3 +1,4 @@
+print("> Interceptor initialization.");
 /*
  * IfxCpu_waitEvent: Hook, just skip to ret
  */
@@ -9,8 +10,8 @@ Interceptor.add_hook("CODE", 0x800019de, 4, |Interceptor, addr, size| {
 });
 
 Interceptor.add_hook("CODE", 0x80000200, 4, |Interceptor, addr, size| {
-    print("> WaitTime, Waiting 1 second...");
-    Interceptor.sleep(1000);
+    // print("> WaitTime, Waiting 10ms...");
+    Interceptor.sleep(10);
     Interceptor.set_pc(0x800002e2);
     return 0;
 });
@@ -23,5 +24,11 @@ Interceptor.add_hook("CODE", 0x80003f4c, 4, |Interceptor, addr, size| {
 Interceptor.add_hook("CODE", 0x80003eac, 0x10000000, |Interceptor, addr, size| {
     let disas = Interceptor.disas(addr, size);
     print(`${addr.to_hex()}> ${disas}`);
+    return 0;
+});
+
+Interceptor.on_event("event-test", |Interceptor, event_type, msg| {
+    print(event_type);
+    print(msg);
     return 0;
 });
