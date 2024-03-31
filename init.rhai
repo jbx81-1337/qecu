@@ -21,11 +21,13 @@ Interceptor.add_hook("CODE", 0x80003f4c, 4, |Interceptor, addr, size| {
     return 0;
 });
 
-Interceptor.add_hook("CODE", 0x80003eac, 0x10000000, |Interceptor, addr, size| {
-    let disas = Interceptor.disas(addr, size);
-    print(`${addr.to_hex()}> ${disas}`);
-    return 0;
-});
+// let a = #{
+//     v1: 0,
+// };
+// Interceptor.add_hook_with_data("CODE", 0x80003eac, 0x10000000, |Interceptor, addr, size, data| {
+//     print(data);
+//     return 0;
+// }, a);
 
 Interceptor.on_event("event-test", |Interceptor, event_type, msg| {
     print(event_type);

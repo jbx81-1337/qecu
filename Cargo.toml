@@ -16,3 +16,4 @@ rust-sleigh = { path = "../rust-sleigh" }
 axum = "*"
 tokio = { version = "1.0", features = ["full"] }
 serde_json = "*"
+rand = "*"

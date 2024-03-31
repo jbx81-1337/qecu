@@ -1,16 +1,22 @@
 use rhai::{Engine, Scope, AST};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{fs, thread::sleep, time};
 use std::fmt;
+use rand::RngCore;
+
+
 use super::emulator::Emulator;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct CodeHook {
+    id: u64,
     begin: u64,
     end: u64,
     code_type: u8,
     content: String
 }
+
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct EventCallback {
@@ -25,6 +31,7 @@ pub struct Interceptor <'a>{
     ast: AST,
     scope: Scope<'a>,
     code_hooks: Vec<CodeHook>,
+    hook_datas: HashMap<u64, rhai::Map>,
     on_events: Vec<EventCallback>
 }
 
@@ -44,6 +51,7 @@ impl <'a> Interceptor <'static> {
             ast: ast,
             scope: Scope::new(),
             code_hooks: Vec::new(),
+            hook_datas: HashMap::new(),
             on_events: Vec::new()
         };
     }
@@ -60,6 +68,7 @@ impl <'a> Interceptor <'static> {
         let intercept = scope.get_value::<Interceptor>("Interceptor").unwrap();
         self.code_hooks = intercept.code_hooks;
         self.on_events = intercept.on_events;
+        self.hook_datas = intercept.hook_datas;
         self.scope = scope.clone();
     }
 
@@ -95,7 +104,11 @@ impl <'a> Interceptor <'static> {
                 let begin: u64 = address.try_into().unwrap();
                 let end: u64 = (address + size).try_into().unwrap();
                 let code_hook = CodeHook {
-                    begin: begin, end: end, code_type: 1, content: fn_name.clone()
+                    id: rand::thread_rng().next_u64(),
+                    begin: begin, 
+                    end: end, 
+                    code_type: 1, 
+                    content: fn_name.clone()
                 };
                 self.code_hooks.push(code_hook);
             }
@@ -111,7 +124,11 @@ impl <'a> Interceptor <'static> {
                 let begin: u64 = address.try_into().unwrap();
                 let end: u64 = (address + size).try_into().unwrap();
                 let code_hook = CodeHook {
-                    begin: begin, end: end, code_type: 0, content: function_name.clone()
+                    id: rand::thread_rng().next_u64(),
+                    begin: begin, 
+                    end: end, 
+                    code_type: 0, 
+                    content: function_name.clone()
                 };
                 self.code_hooks.push(code_hook);
             }
@@ -122,6 +139,51 @@ impl <'a> Interceptor <'static> {
 
     }
 
+    pub fn add_hook_with_data(&mut self, hook_type: String, address: i64, size: i64, function_name: String, data: rhai::Map) {
+        match hook_type.as_str() {
+            "CODE" => {
+                let begin: u64 = address.try_into().unwrap();
+                let end: u64 = (address + size).try_into().unwrap();
+                let id = rand::thread_rng().next_u64();
+                let code_hook = CodeHook {
+                    id : id,
+                    begin: begin, 
+                    end: end, 
+                    code_type: 0, 
+                    content: function_name.clone()
+                };
+                self.code_hooks.push(code_hook);
+                self.hook_datas.insert(id, data);
+            }
+            _ => {
+                panic!("[interceptor::add_hook] Unknown hook type {} ", hook_type);
+            }
+        }
+    }
+
+    pub fn add_cb_hook_with_data(&mut self, hook_type: String, address: i64, size: i64, callback: rhai::FnPtr, data: rhai::Map) {
+        let fn_name = callback.fn_name().to_string();
+        match hook_type.as_str() {
+            "CODE" => {
+                let begin: u64 = address.try_into().unwrap();
+                let end: u64 = (address + size).try_into().unwrap();
+                let id = rand::thread_rng().next_u64();
+                let code_hook = CodeHook {
+                    id: id,
+                    begin: begin, 
+                    end: end, 
+                    code_type: 1, 
+                    content: fn_name.clone()
+                };
+                self.code_hooks.push(code_hook);
+                self.hook_datas.insert(id, data);
+            }
+            _ => {
+                panic!("[interceptor::add_hook] Unknown hook type {} ", hook_type);
+            }
+        }
+
+    }
     pub fn on_cb_event(&mut self, event_type: String, callback: rhai::FnPtr) {
         let fn_name = callback.fn_name().to_string();
         let evt = EventCallback {
@@ -161,13 +223,28 @@ impl <'a> Interceptor <'static> {
                 let mut _engine = make_engine();
                 let mut _scope = self.scope.clone();
                 let ast = self.ast.clone_functions_only();
+                let data = self.hook_datas.get(&code_hook.id);
                 match code_hook.code_type {
                     0 => {
-                        _engine.call_fn::<i64>(&mut _scope, &ast, &code_hook.content, (addr_rhai, size_rhai))
-                            .expect(format!("[interceptor::on_code_hook] Cannot call function {} ", code_hook.content).as_str());
+                        match data {
+                            None => { _engine.call_fn::<i64>(&mut _scope, &ast, &code_hook.content, (addr_rhai, size_rhai))
+                                             .expect(format!("[interceptor::on_code_hook] Cannot call function {} ", code_hook.content).as_str()); },
+                            Some(data) =>  {
+                                _engine.call_fn::<i64>(&mut _scope, &ast, &code_hook.content, (addr_rhai, size_rhai, data.clone()))
+                                        .expect(format!("[interceptor::on_code_hook] Cannot call function {} ", code_hook.content).as_str()); 
+                            }
+                        }
+                        
                     }
-                    1 => { _engine.call_fn::<i64>(&mut _scope, &ast, &code_hook.content, (self.clone(), addr_rhai, size_rhai))
-                    .       expect(format!("[interceptor::on_code_hook] Cannot call function {} ", code_hook.content).as_str());
+                    1 => {
+                        match data {
+                            None => { _engine.call_fn::<i64>(&mut _scope, &ast, &code_hook.content, (self.clone(), addr_rhai, size_rhai))
+                                             .expect(format!("[interceptor::on_code_hook] Cannot call function {} ", code_hook.content).as_str()); },
+                            Some(data) => { 
+                                _engine.call_fn::<i64>(&mut _scope, &ast, &code_hook.content, (self.clone(), addr_rhai, size_rhai, data.clone()))
+                                        .expect(format!("[interceptor::on_code_hook] Cannot call function {} ", code_hook.content).as_str()); }
+                        } 
+                        
                     }
                     _ => {}
                 }
@@ -216,6 +293,8 @@ pub fn make_engine() -> Engine{
         register_fn("write_memory", Interceptor::write_memory).
         register_fn("add_hook", Interceptor::add_hook).
         register_fn("add_hook", Interceptor::add_cb_hook).
+        register_fn("add_hook_with_data", Interceptor::add_hook_with_data).
+        register_fn("add_hook_with_data", Interceptor::add_cb_hook_with_data).
         register_fn("on_event", Interceptor::on_event).
         register_fn("on_event", Interceptor::on_cb_event).
         register_fn("disas", Interceptor::disas).
