@@ -31,7 +31,7 @@ Interceptor.add_hook("CODE", 0x80003f4c, 4, |Interceptor, addr, size| {
 });
 
 Interceptor.add_hook_with_data("CODE", 0x80003eac, 0x10000000, |Interceptor, addr, size, ecu| {
-    print(`${ecu.mm.ASCLIN1_ACCEN0.to_hex()}`);
+    print(`Address of ASCLIN1_ACCEN0 is ${ecu.mm.ASCLIN1_ACCEN0.to_hex()}`);
     return 0;
 }, ecu);
 
