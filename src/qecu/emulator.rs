@@ -42,7 +42,7 @@ impl<'a> Emulator <'static>{
             let workflow = workflow.clone();
             let input = workflow.input;
             let registers = &workflow.registers;
-            let code_sections = utils::loader::Loader::new(&input.format, &input.path);
+            let code_sections = utils::loader::Loader::load_code_sections(&input.format, &input.path);
             let uc = &mut unicorn;
             for mem_map in workflow.mem_map {
                 let mut perms = Permission::NONE;
@@ -148,11 +148,10 @@ impl<'a> Emulator <'static>{
 
     pub fn run(&self) {
         {
-            let mut lock = self.interceptor.lock();
-            let intercept = lock.as_mut().unwrap().as_mut().unwrap();
+            let mut mutex_guard = self.interceptor.lock().unwrap();
+            let intercept = mutex_guard.as_mut().unwrap();
             intercept.set_emulator(self.clone());
             intercept.init();
-            drop(lock);
         }
 
         let mut uc = self.mut_uc();   
