@@ -11,7 +11,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 unicorn-engine = "2.0.0"
 rhai = "*"
-rust-sleigh = { path = "../rust-sleigh" }
+# rust-sleigh = { path = "../rust-sleigh" }
+rust-sleigh = { git = "https://github.com/jbx81-1337/rust-sleigh" }
 
 axum = "*"
 tokio = { version = "1.0", features = ["full"] }

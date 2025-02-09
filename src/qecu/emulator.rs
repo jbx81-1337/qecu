@@ -162,7 +162,7 @@ impl<'a> Emulator <'static>{
         uc.emu_start(0x80003d10, 0xFFFFFFFF, 0x00, 0x00).unwrap();
     }
 
-    pub fn disas(&self, code: Vec<u8>, addr: u64, size: u32) -> String{
+    pub fn disas(&self, code: Vec<u8>, addr: u64, size: u32) -> Vec<rust_sleigh::ffi::SleighInstruction> {
         let disas = {
             self.disas.lock().unwrap().disas.clone()
         };

@@ -77,8 +77,12 @@ impl <'a> Interceptor <'static> {
         let address: u64 = address.try_into().unwrap();
         let size: u32 = size.try_into().unwrap();
         let mut disas = self.emulator.as_ref().unwrap().disas(code, address, size);
-        disas.pop();
-        return disas;
+        let mut out = String::new();
+        for ins in disas {
+            let line = format!("{} {}", ins.mnemonic, ins.body);
+            out.push_str(line.as_str());
+        }
+        return out;
     }
     
     pub fn read_register(&mut self, reg_name: String) -> i64{
