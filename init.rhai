@@ -1,9 +1,11 @@
 import "rhai/tricore/tricore" as tricore;
 
-let cpu = "tc375";
-
-print(`> Loading ${cpu} Memory Map`);
-let ecu = tricore::load("tc375");
+// Memory Maps symbol on Rhai side are slow af
+// Need to be moved diretly in Rust.
+// let cpu = "tc375";
+// print(`> Loading ${cpu} Memory Map`);
+// let ecu = tricore::load("tc375");
+let ecu = #{};
 print("> Mempry Map loaded");
 
 print("> Interceptor initialization.");
@@ -31,7 +33,7 @@ Interceptor.add_hook("CODE", 0x80003f4c, 4, |Interceptor, addr, size| {
 });
 
 Interceptor.add_hook_with_data("CODE", 0x80003eac, 0x10000000, |Interceptor, addr, size, ecu| {
-    print(`Address of ASCLIN1_ACCEN0 is ${ecu.mm.ASCLIN1_ACCEN0.to_hex()}`);
+    print(`${Interceptor.disas(addr, size)}`);
     return 0;
 }, ecu);
 
