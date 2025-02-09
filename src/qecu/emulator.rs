@@ -1,5 +1,5 @@
 use rust_sleigh::SleighDecompiler;
-use unicorn_engine::{Unicorn, RegisterTRICORE};
+use unicorn_engine::{RegisterTRICORE, Unicorn, UnicornInner};
 use unicorn_engine::unicorn_const::{Arch, Mode, Permission};
 use crate::utils::{self, workflow::Workflow};
 use std::os::raw::c_void;
@@ -96,8 +96,11 @@ impl<'a> Emulator <'static>{
         }
     }
 
-    pub fn mut_uc(&self) -> Unicorn<'_, ()>{
-        return Unicorn::try_from(self.get_uc_handle()).unwrap();
+    pub fn mut_uc(&self) -> Unicorn<'_, ()> {
+        unsafe {
+            let uc_handle = self.get_uc_handle();
+            return Unicorn::from_handle(uc_handle).unwrap();
+        }
     }
     
     pub fn read_register(&self, reg_name: String) -> u64 {

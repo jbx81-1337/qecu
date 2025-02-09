@@ -47,7 +47,7 @@ async fn interceptor_get_event_hooks(State(state): State<AppState>) -> Json<Vec<
 
 pub async fn bootstrap(bind_addr: String, emulator: Emulator<'static>) {
     let app = Router::new()
-                                .route("/emit/:event_type", post(emit))
+                                .route("/emit/{event_type}", post(emit))
                                 .route("/interceptor/hooks/code", get(interceptor_get_code_hooks))
                                 .route("/interceptor/hooks/events", get(interceptor_get_event_hooks))
                             .with_state(AppState { emulator: emulator});

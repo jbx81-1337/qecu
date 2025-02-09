@@ -8,6 +8,15 @@ QECU is an attempt to create an ECU emulator framework for the following archite
 
 Currently only Tricore is supported.
 
+## INSTALLATION
+```bash
+sudo apt update
+sudo apt install build-essential cmake pkg-config zlib1g-dev
+git clone https://github.com/jbx81-1337/qecu
+cd qecu
+cargo build
+```
+
 ## Features
 Qecu should be able to support mainly three formats: Elf, Intel-Hex and raw binary. Currently only the ELF format is implemented.
 
