@@ -284,7 +284,10 @@ impl <'a> Interceptor <'static> {
     pub fn get_event_hooks(&self) -> Vec<EventCallback> {
         self.on_events.clone()
     }
+}
 
+pub fn get_cpu_symbol(cpu: String, symbol: String) -> u32 {
+    crate::qecu::arch::tricore::get_cpu_symbol(cpu, symbol)
 }
 
 pub fn make_engine() -> Engine{
@@ -303,7 +306,9 @@ pub fn make_engine() -> Engine{
         register_fn("on_event", Interceptor::on_cb_event).
         register_fn("disas", Interceptor::disas).
         register_fn("sleep", Interceptor::sleep).
+        register_fn("get_code_hooks", Interceptor::get_code_hooks).
         register_fn("set_pc", Interceptor::set_pc);
+    engine.register_fn("get_cpu_symbol", get_cpu_symbol);
     return engine;
 }
 
