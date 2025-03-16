@@ -76,7 +76,7 @@ impl <'a> Interceptor <'static> {
         let code = self.read_memory(address, size);
         let address: u64 = address.try_into().unwrap();
         let size: u32 = size.try_into().unwrap();
-        let mut disas = self.emulator.as_ref().unwrap().disas(code, address, size);
+        let disas = self.emulator.as_ref().unwrap().disas(code, address, size);
         let mut out = String::new();
         for ins in disas {
             let line = format!("{} {}", ins.mnemonic, ins.body);
@@ -108,7 +108,7 @@ impl <'a> Interceptor <'static> {
                 let begin: u64 = address.try_into().unwrap();
                 let end: u64 = (address + size).try_into().unwrap();
                 let code_hook = CodeHook {
-                    id: rand::thread_rng().next_u64(),
+                    id: rand::rng().next_u64(),
                     begin: begin, 
                     end: end, 
                     code_type: 1, 
@@ -128,7 +128,7 @@ impl <'a> Interceptor <'static> {
                 let begin: u64 = address.try_into().unwrap();
                 let end: u64 = (address + size).try_into().unwrap();
                 let code_hook = CodeHook {
-                    id: rand::thread_rng().next_u64(),
+                    id: rand::rng().next_u64(),
                     begin: begin, 
                     end: end, 
                     code_type: 0, 
@@ -148,7 +148,7 @@ impl <'a> Interceptor <'static> {
             "CODE" => {
                 let begin: u64 = address.try_into().unwrap();
                 let end: u64 = (address + size).try_into().unwrap();
-                let id = rand::thread_rng().next_u64();
+                let id = rand::rng().next_u64();
                 let code_hook = CodeHook {
                     id : id,
                     begin: begin, 
@@ -171,7 +171,7 @@ impl <'a> Interceptor <'static> {
             "CODE" => {
                 let begin: u64 = address.try_into().unwrap();
                 let end: u64 = (address + size).try_into().unwrap();
-                let id = rand::thread_rng().next_u64();
+                let id = rand::rng().next_u64();
                 let code_hook = CodeHook {
                     id: id,
                     begin: begin, 

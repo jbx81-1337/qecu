@@ -1,5 +1,5 @@
 use rust_sleigh::SleighDecompiler;
-use unicorn_engine::{RegisterTRICORE, Unicorn, UnicornInner};
+use unicorn_engine::{RegisterTRICORE, Unicorn};
 use unicorn_engine::unicorn_const::{Arch, Mode, Permission};
 use crate::utils::{self, workflow::Workflow};
 use std::os::raw::c_void;
@@ -144,9 +144,9 @@ impl<'a> Emulator <'static>{
     }
 
     pub fn emit(&self, event_type: String, msg: String) {
-        let mut lock = self.interceptor.lock();
-        let intercept = lock.as_mut().unwrap().as_mut().unwrap();
-        intercept.emit(event_type, msg);
+        // let mut lock = self.interceptor.lock();
+        // let intercept = lock.as_mut().unwrap().as_mut().unwrap();
+        self.interceptor.lock().unwrap().as_ref().unwrap().emit(event_type, msg);
     }
 
     pub fn run(&self) {

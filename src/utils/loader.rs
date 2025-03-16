@@ -53,7 +53,7 @@ impl Loader {
         let file = ElfBytes::<AnyEndian>::minimal_parse(slice).unwrap();
 
         let sym_table = file.symbol_table().unwrap();
-        for symbol in sym_table.iter() {}
+        for _symbol in sym_table.iter() {}
 
         return ret;
     }
