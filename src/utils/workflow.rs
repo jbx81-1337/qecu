@@ -35,7 +35,8 @@ pub struct Workflow {
     pub registers: Vec<WorkflowRegister>,
     // pub boot: WorkflowBoot,
     pub init_script: String,
-    pub entry: Option<u64>
+    pub entry: Option<u64>,
+    pub until: Option<u64>
 }
 
 impl Workflow {

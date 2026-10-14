@@ -125,6 +125,10 @@ fn link_host_api(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
         emu(&c)?.set_pc(addr as u64);
         Ok(())
     })?;
+    linker.func_wrap("qecu", "stop", |c: Caller<'_, HostState>| -> wasmtime::Result<()> {
+        emu(&c)?.stop();
+        Ok(())
+    })?;
     linker.func_wrap("qecu", "sleep", |_c: Caller<'_, HostState>, ms: i64| {
         sleep(time::Duration::from_millis(ms.max(0) as u64));
     })?;

@@ -1,7 +1,7 @@
 project: Emulator Config
 input:
   format: elf
-  path: ./test/firmware.elf  # bare-metal AArch64 ELF (not Linux)
+  path: ./firmware/firmware.elf  # bare-metal AArch64 ELF (not Linux), see firmware/build.sh
     
 mem_map:
   - from: 0x40000000   # flash / code

@@ -37,6 +37,7 @@ pub struct Emulator <'a>{
     uc: Arc<Mutex<UcWrapper<'static>>>,
     disas: Arc<Mutex<CapstoneWrapper>>,
     entry: u64,
+    until: u64,
     _marker: std::marker::PhantomData<&'a ()>,
     pub interceptor: Arc<Mutex<Option<WasmEngine>>>
 }
@@ -80,6 +81,7 @@ impl<'a> Emulator <'static>{
                 println!("[unicorn::reg_write] register: {} value: {:#01x}", register.name, register.value);
             }
         }
+        let until = workflow.until.unwrap_or(u64::MAX);
         let entry = workflow.entry.unwrap_or_else(|| {
             utils::loader::Loader::load_entry(&workflow.input.format, &workflow.input.path)
         });
@@ -98,6 +100,7 @@ impl<'a> Emulator <'static>{
                     .expect("[capstone] Cannot initialize disassembler")
             })),
             entry,
+            until: until,
             _marker: std::marker::PhantomData,
             interceptor: Arc::new(Mutex::new(Some(WasmEngine::new(init_script))))
         }
@@ -140,6 +143,10 @@ impl<'a> Emulator <'static>{
         self.mut_uc().set_pc(addr).expect("[emulator::set_pc] Cannot set pc");
     }
 
+    pub fn stop(&self) {
+        self.mut_uc().emu_stop().expect("[emulator::stop] Cannot stop emulation");
+    }
+
     pub fn on_code_hook(&self, _addr: u64, _size: u32) {
         let mut lock = self.interceptor.lock();
         let intercept = lock.as_mut().unwrap().as_mut().unwrap();
@@ -169,7 +176,8 @@ impl<'a> Emulator <'static>{
             self.on_code_hook(addr, size);
         };
         uc.add_code_hook(0, u64::MAX, callback).expect("[emulator::run] Cannot install default code_hook");
-        uc.emu_start(self.entry, u64::MAX, 0x00, 0x00).unwrap();
+        uc.emu_start(self.entry, self.until, 0x00, 0x00).unwrap();
+        println!("[emulator::run] Emulation finished, pc={:#x}", uc.pc_read().unwrap());
     }
 
     pub fn disas(&self, code: Vec<u8>, addr: u64, _size: u32) -> Vec<DisasLine> {
