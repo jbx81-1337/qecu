@@ -9,7 +9,7 @@ pub struct WorkflowInput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowMemMap {
     pub from: u64,
-    pub size: usize,
+    pub size: u64,
     pub flags: String
 }
 
@@ -35,7 +35,8 @@ pub struct Workflow {
     pub registers: Vec<WorkflowRegister>,
     // pub boot: WorkflowBoot,
     pub init_script: String,
-    pub sleigh_path: String
+    pub entry: Option<u64>,
+    pub until: Option<u64>
 }
 
 impl Workflow {

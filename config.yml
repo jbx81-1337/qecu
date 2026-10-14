@@ -1,44 +1,24 @@
 project: Emulator Config
 input:
   format: elf
-  path: ./test/ecu.elf
+  path: ./firmware/firmware.elf  # bare-metal AArch64 ELF (not Linux), see firmware/build.sh
     
 mem_map:
-  - from: 0x0
-    size: 0x10000000
-    flags: '*'
-
-  - from: 0x50000000
-    size: 0x10000000
-    flags: '*'
-
-  - from: 0x60000000
-    size: 0x10000000
-    flags: RWX  
-  
-  - from: 0x70000000
+  - from: 0x40000000   # flash / code
     size: 0x10000000
     flags: RWX
 
-  - from: 0x80000000
-    size: 0x10000000
-    flags: RWX
-      
-  - from: 0xa0000000
-    size: 0x10000000
-    flags: RWX 
-
-  - from: 0xd0000000
+  - from: 0x50000000   # SRAM
     size: 0x10000000
     flags: RWX
 
-  - from: 0xf0000000
+  - from: 0x60000000   # peripherals
     size: 0x10000000
-    flags: RWX
+    flags: RW
 
 registers:
-  - name: 'A0'
-    value:  0x1337
+  - name: 'SP'
+    value: 0x5ffff000
 
 # boot:
 #   begin: 0x80003d10
@@ -46,5 +26,5 @@ registers:
 #   timout: 0x00
 #   count: 0x00
 
-init_script: ./init.rhai
+init_script: ./plugins/example/target/wasm32-wasip1/release/example.wasm
 sleigh_path: ../rust-sleigh/vendor/share/sleigh/specfiles/Ghidra/Processors

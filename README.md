@@ -1,12 +1,12 @@
 # QECU
 QECU is an attempt to create an ECU emulator framework for the following architectures:
-- Tricore
+- AArch64 (bare-metal firmware ELF, not Linux)
 - Renesas
 - MIPS
 - ARM
 - V850
 
-Currently only Tricore is supported.
+Currently only AArch64 is supported (disassembly via Capstone).
 
 ## INSTALLATION
 ```bash
@@ -30,9 +30,9 @@ One testing example is present with the name `config.yml`
 
 Under the hood QECU is using Unicorn (QEMU) and around that instance we can communicate with the Emulator in different ways.
 
-The core feature QECU has is to be developed in Rust but being scriptable using Rhai, to do so we can use the aid of the `Interceptor`.
+The core feature QECU has is to be developed in Rust but being extensible through WebAssembly plugins (Rust compiled to `wasm32-wasip1`, JIT-compiled and sandboxed by Wasmtime).
 
-The Interceptor is Rhai living object that expose a way to interact with the Unicorn Emulator. With the aid of the Interceptor is possible to hook the execution of the Emulator at a certein address range and perform operation on registers and memory.
+The plugin (the `init_script` path in the config) imports the host module `qecu` (`add_code_hook`, `on_event`, `read_register`, `write_register`, `read_memory`, `write_memory`, `set_pc`, `stop`, `sleep`, `disas`, `get_cpu_symbol`) and exports `qecu_alloc`, `qecu_init`, `qecu_on_code`, `qecu_on_event`. See `plugins/example` and `src/qecu/wasm_engine.rs`. With it is possible to hook the execution of the Emulator at a certein address range and perform operation on registers and memory.
 
 Also an API server is in development to being able to expose information and accept external event.
 
@@ -66,9 +66,8 @@ Emulator Config
 [unicorn::mem_write] address: 0x0 size: 92
 [unicorn::mem_write] address: 0x0 size: 1319440
 [unicorn::reg_write] register: A0 value: 0x1337
-../rust-sleigh/vendor/share/sleigh/specfiles/Ghidra/Processors
 > Loading tc375 Memory Map
-> Loading Tricore tc375 CPU
+> Loading AArch64 CPU
 > Mempry Map loaded
 > Interceptor initialization.
 Address of ASCLIN1_ACCEN0 is f00007fc
@@ -79,3 +78,11 @@ Address of ASCLIN1_ACCEN0 is f00007fc
 ### Conclusion
 This project is a toy and mainly it was to learn more about Automotive, since I've left that industry I am not longer activily developing it but on my free-time I generally try to allocate some time mainly to learn Rust.
 Every contribution is well accepted.
+
+### Try it with the dummy AArch64 firmware
+```bash
+firmware/build.sh                       # optional: rebuilds firmware/firmware.elf (clang + ld.lld)
+(cd plugins/example && cargo build --release --target wasm32-wasip1)
+cargo run                               # uses config.yml
+curl -X POST localhost:3000/emit/can-recv -H 'content-type: application/json' -d '{"msg":"hello"}'
+```

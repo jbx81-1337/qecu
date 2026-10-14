@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tokio::task::spawn_blocking;
 use crate::qecu::emulator::Emulator;
 
-use super::interceptor::{CodeHook, EventCallback};
+use super::wasm_engine::{CodeHook, EventCallback};
 
 #[derive(Clone)]
 struct AppState {

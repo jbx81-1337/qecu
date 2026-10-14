@@ -33,6 +33,9 @@ impl Loader {
         print!("[qecu::loader] Loading sections.\n");
         let _sections = file.section_headers().unwrap();
         for _section in _sections.iter() {
+            if _section.sh_addr == 0 || _section.sh_type == elf::abi::SHT_NOBITS {
+                continue;
+            }
             let _data = file.section_data(&_section).unwrap().0;
             let code_section: CodeSection = CodeSection {
                 address: _section.sh_addr,
@@ -56,6 +59,19 @@ impl Loader {
         for _symbol in sym_table.iter() {}
 
         return ret;
+    }
+
+    fn load_elf_entry(path: &String) -> u64 {
+        let file_data = std::fs::read(std::path::PathBuf::from(path)).expect("[Could not read file.");
+        let file = ElfBytes::<AnyEndian>::minimal_parse(file_data.as_slice()).unwrap();
+        file.ehdr.e_entry
+    }
+
+    pub fn load_entry(format: &str, path: &String) -> u64 {
+        match format {
+            "elf" => Loader::load_elf_entry(path),
+            _ => panic!("[qecu::loader] Unsupported Format.\n")
+        }
     }
 
     pub fn load_code_sections(format: &str, path: &String) -> Vec<CodeSection> {

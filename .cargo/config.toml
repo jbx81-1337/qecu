@@ -1,0 +1,3 @@
+# tc375.rs contains a ~21k-arm match that overflows rustc's default stack
+[env]
+RUST_MIN_STACK = "536870912"
