@@ -46,5 +46,5 @@ registers:
 #   timout: 0x00
 #   count: 0x00
 
-init_script: ./init.rhai
+init_script: ./plugins/example/target/wasm32-wasip1/release/example.wasm
 sleigh_path: ../rust-sleigh/vendor/share/sleigh/specfiles/Ghidra/Processors

@@ -5,7 +5,7 @@ use crate::utils::{self, workflow::Workflow};
 use std::os::raw::c_void;
 use std::sync::{Arc, Mutex};
 use std::fmt;
-use super::interceptor::Interceptor;
+use super::wasm_engine::WasmEngine;
 
 struct UcWrapper <'a>{
     uc: Unicorn<'a, ()>
@@ -31,7 +31,7 @@ pub struct Emulator <'a>{
     pub wf: Arc<Workflow>,
     uc: Arc<Mutex<UcWrapper<'static>>>,
     disas: Arc<Mutex<SleighDecompilerWrapper>>,
-    pub interceptor: Arc<Mutex<Option<Interceptor<'a>>>>
+    pub interceptor: Arc<Mutex<Option<WasmEngine>>>
 }
 
 impl<'a> Emulator <'static>{
@@ -92,7 +92,7 @@ impl<'a> Emulator <'static>{
                                                     }
                                                 )
                                             ),
-            interceptor: Arc::new(Mutex::new(Some(Interceptor::new(init_script))))
+            interceptor: Arc::new(Mutex::new(Some(WasmEngine::new(init_script))))
         }
     }
 
@@ -146,7 +146,7 @@ impl<'a> Emulator <'static>{
     pub fn emit(&self, event_type: String, msg: String) {
         // let mut lock = self.interceptor.lock();
         // let intercept = lock.as_mut().unwrap().as_mut().unwrap();
-        self.interceptor.lock().unwrap().as_ref().unwrap().emit(event_type, msg);
+        self.interceptor.lock().unwrap().as_mut().unwrap().emit(event_type, msg);
     }
 
     pub fn run(&self) {

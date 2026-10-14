@@ -10,7 +10,6 @@ elf = "0.7.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 unicorn-engine = "2.0.0"
-rhai = "*"
 # rust-sleigh = { path = "../rust-sleigh" }
 rust-sleigh = { git = "https://github.com/jbx81-1337/rust-sleigh" }
 
@@ -18,3 +17,5 @@ axum = "*"
 tokio = { version = "1.0", features = ["full"] }
 serde_json = "*"
 rand = "*"
+wasmtime = "49.0.3"
+wasmtime-wasi = "49.0.3"

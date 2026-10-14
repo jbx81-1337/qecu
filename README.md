@@ -30,9 +30,9 @@ One testing example is present with the name `config.yml`
 
 Under the hood QECU is using Unicorn (QEMU) and around that instance we can communicate with the Emulator in different ways.
 
-The core feature QECU has is to be developed in Rust but being scriptable using Rhai, to do so we can use the aid of the `Interceptor`.
+The core feature QECU has is to be developed in Rust but being extensible through WebAssembly plugins (Rust compiled to `wasm32-wasip1`, JIT-compiled and sandboxed by Wasmtime).
 
-The Interceptor is Rhai living object that expose a way to interact with the Unicorn Emulator. With the aid of the Interceptor is possible to hook the execution of the Emulator at a certein address range and perform operation on registers and memory.
+The plugin (the `init_script` path in the config) imports the host module `qecu` (`add_code_hook`, `on_event`, `read_register`, `write_register`, `read_memory`, `write_memory`, `set_pc`, `sleep`, `disas`, `get_cpu_symbol`) and exports `qecu_alloc`, `qecu_init`, `qecu_on_code`, `qecu_on_event`. See `plugins/example` and `src/qecu/wasm_engine.rs`. With it is possible to hook the execution of the Emulator at a certein address range and perform operation on registers and memory.
 
 Also an API server is in development to being able to expose information and accept external event.
 
