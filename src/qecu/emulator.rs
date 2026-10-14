@@ -1,8 +1,7 @@
-use rust_sleigh::SleighDecompiler;
-use unicorn_engine::{RegisterTRICORE, Unicorn};
-use unicorn_engine::unicorn_const::{Arch, Mode, Permission};
+use capstone::prelude::*;
+use unicorn_engine::{RegisterARM64, Unicorn};
+use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use crate::utils::{self, workflow::Workflow};
-use std::os::raw::c_void;
 use std::sync::{Arc, Mutex};
 use std::fmt;
 use super::wasm_engine::WasmEngine;
@@ -17,27 +16,35 @@ impl <'a> fmt::Debug for UcWrapper<'static> {
     }
 }
 
-struct SleighDecompilerWrapper {
-    disas: SleighDecompiler
+struct CapstoneWrapper {
+    cs: Capstone
 }
-unsafe impl Send for SleighDecompilerWrapper{}
-impl fmt::Debug for SleighDecompilerWrapper {
+unsafe impl Send for CapstoneWrapper{}
+impl fmt::Debug for CapstoneWrapper {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SleighDecompilerWrapper")
+        write!(f, "CapstoneWrapper")
     }
 }
+
+pub struct DisasLine {
+    pub mnemonic: String,
+    pub body: String
+}
+
 #[derive(Debug, Clone)]
 pub struct Emulator <'a>{
     pub wf: Arc<Workflow>,
     uc: Arc<Mutex<UcWrapper<'static>>>,
-    disas: Arc<Mutex<SleighDecompilerWrapper>>,
+    disas: Arc<Mutex<CapstoneWrapper>>,
+    entry: u64,
+    _marker: std::marker::PhantomData<&'a ()>,
     pub interceptor: Arc<Mutex<Option<WasmEngine>>>
 }
 
 impl<'a> Emulator <'static>{
 
     pub fn new(workflow: Workflow) -> Emulator<'static> {
-        let mut unicorn: Unicorn<'_, ()> = Unicorn::new(Arch::TRICORE, Mode::LITTLE_ENDIAN).expect("failed to initialize Unicorn instance");
+        let mut unicorn: Unicorn<'_, ()> = Unicorn::new(Arch::ARM64, Mode::LITTLE_ENDIAN).expect("failed to initialize Unicorn instance");
         {
             let workflow = workflow.clone();
             let input = workflow.input;
@@ -45,14 +52,14 @@ impl<'a> Emulator <'static>{
             let code_sections = utils::loader::Loader::load_code_sections(&input.format, &input.path);
             let uc = &mut unicorn;
             for mem_map in workflow.mem_map {
-                let mut perms = Permission::NONE;
+                let mut perms = Prot::NONE;
                 for chr in mem_map.flags.to_uppercase().chars() {
                     let new_permission_feature = match chr {
-                        'R' => Permission::READ,
-                        'W' => Permission::WRITE,
-                        'X' => Permission::EXEC,
-                        '*' => Permission::ALL,
-                        _ => Permission::NONE
+                        'R' => Prot::READ,
+                        'W' => Prot::WRITE,
+                        'X' => Prot::EXEC,
+                        '*' => Prot::ALL,
+                        _ => Prot::NONE
                     };
                     perms = perms | new_permission_feature;
                 }
@@ -73,9 +80,9 @@ impl<'a> Emulator <'static>{
                 println!("[unicorn::reg_write] register: {} value: {:#01x}", register.name, register.value);
             }
         }
-        let sleigh_path = {
-            workflow.sleigh_path.clone()
-        };
+        let entry = workflow.entry.unwrap_or_else(|| {
+            utils::loader::Loader::load_entry(&workflow.input.format, &workflow.input.path)
+        });
         let init_script = {
             workflow.init_script.clone()
         };
@@ -83,15 +90,15 @@ impl<'a> Emulator <'static>{
         Emulator {
             wf: Arc::new(workflow), 
             uc: Arc::new(Mutex::new(UcWrapper { uc: unicorn })),
-            disas: 
-                Arc::new(
-                    Mutex::new(SleighDecompilerWrapper { 
-                        disas: SleighDecompiler::new(sleigh_path,
-                                                        String::from("/tricore/data/languages/tricore.sla"),
-                                                        String::from("/tricore/data/languages/tricore.pspec"))
-                                                    }
-                                                )
-                                            ),
+            disas: Arc::new(Mutex::new(CapstoneWrapper {
+                cs: Capstone::new()
+                    .arm64()
+                    .mode(arch::arm64::ArchMode::Arm)
+                    .build()
+                    .expect("[capstone] Cannot initialize disassembler")
+            })),
+            entry,
+            _marker: std::marker::PhantomData,
             interceptor: Arc::new(Mutex::new(Some(WasmEngine::new(init_script))))
         }
     }
@@ -139,7 +146,7 @@ impl<'a> Emulator <'static>{
         intercept.on_code_hook(_addr, _size);
     }
 
-    pub fn get_uc_handle(&self) -> *mut c_void {
+    pub fn get_uc_handle(&self) -> *mut unicorn_engine::uc_engine {
         self.uc.lock().unwrap().uc.get_handle()
     }
 
@@ -161,56 +168,61 @@ impl<'a> Emulator <'static>{
         let callback = move |_uc: &mut Unicorn<'_, ()>, addr: u64, size: u32| {
             self.on_code_hook(addr, size);
         };
-        uc.add_code_hook(0, 0xFFFFFFFF, callback).expect("[emulator::run] Cannot install default code_hook");
-        uc.emu_start(0x80003d10, 0xFFFFFFFF, 0x00, 0x00).unwrap();
+        uc.add_code_hook(0, u64::MAX, callback).expect("[emulator::run] Cannot install default code_hook");
+        uc.emu_start(self.entry, u64::MAX, 0x00, 0x00).unwrap();
     }
 
-    pub fn disas(&self, code: Vec<u8>, addr: u64, size: u32) -> Vec<rust_sleigh::ffi::SleighInstruction> {
-        let disas = {
-            self.disas.lock().unwrap().disas.clone()
+    pub fn disas(&self, code: Vec<u8>, addr: u64, _size: u32) -> Vec<DisasLine> {
+        let cs = self.disas.lock().unwrap();
+        let result = match cs.cs.disasm_all(&code, addr) {
+            Ok(insns) => insns.iter().map(|i| DisasLine {
+                mnemonic: i.mnemonic().unwrap_or("").to_string(),
+                body: i.op_str().unwrap_or("").to_string()
+            }).collect(),
+            Err(_) => Vec::new()
         };
-        return disas.disas(code, addr, size);
+        result
     }
 
-    pub fn get_register(reg_name: &String) -> RegisterTRICORE {
+    pub fn get_register(reg_name: &String) -> RegisterARM64 {
         match reg_name.to_uppercase().as_str() {
-            "A0" => RegisterTRICORE::A0,
-            "A1" => RegisterTRICORE::A1,
-            "A2" => RegisterTRICORE::A2,
-            "A3" => RegisterTRICORE::A3,
-            "A4" => RegisterTRICORE::A4,
-            "A5" => RegisterTRICORE::A5,
-            "A6" => RegisterTRICORE::A6,
-            "A7" => RegisterTRICORE::A7,
-            "A8" => RegisterTRICORE::A8,
-            "A9" => RegisterTRICORE::A9,
-            "A10" => RegisterTRICORE::A10,
-            "A11" => RegisterTRICORE::A11,
-            "A12" => RegisterTRICORE::A12,
-            "A13" => RegisterTRICORE::A13,
-            "A14" => RegisterTRICORE::A14,
-            "A15" => RegisterTRICORE::A15,
-
-            "D0" => RegisterTRICORE::D0,
-            "D1" => RegisterTRICORE::D1,
-            "D2" => RegisterTRICORE::D2,
-            "D3" => RegisterTRICORE::D3,
-            "D4" => RegisterTRICORE::D4,
-            "D5" => RegisterTRICORE::D5,
-            "D6" => RegisterTRICORE::D6,
-            "D7" => RegisterTRICORE::D7,
-            "D8" => RegisterTRICORE::D8,
-            "D9" => RegisterTRICORE::D9,
-            "D10" => RegisterTRICORE::D10,
-            "D11" => RegisterTRICORE::D11,
-            "D12" => RegisterTRICORE::D12,
-            "D13" => RegisterTRICORE::D13,
-            "D14" => RegisterTRICORE::D14,
-            "D15" => RegisterTRICORE::D15,
-            
-            "BIV" => RegisterTRICORE::BIV,
-            "FCX" => RegisterTRICORE::FCX,
-            _ => RegisterTRICORE::A0
+            "X0" => RegisterARM64::X0,
+            "X1" => RegisterARM64::X1,
+            "X2" => RegisterARM64::X2,
+            "X3" => RegisterARM64::X3,
+            "X4" => RegisterARM64::X4,
+            "X5" => RegisterARM64::X5,
+            "X6" => RegisterARM64::X6,
+            "X7" => RegisterARM64::X7,
+            "X8" => RegisterARM64::X8,
+            "X9" => RegisterARM64::X9,
+            "X10" => RegisterARM64::X10,
+            "X11" => RegisterARM64::X11,
+            "X12" => RegisterARM64::X12,
+            "X13" => RegisterARM64::X13,
+            "X14" => RegisterARM64::X14,
+            "X15" => RegisterARM64::X15,
+            "X16" => RegisterARM64::X16,
+            "X17" => RegisterARM64::X17,
+            "X18" => RegisterARM64::X18,
+            "X19" => RegisterARM64::X19,
+            "X20" => RegisterARM64::X20,
+            "X21" => RegisterARM64::X21,
+            "X22" => RegisterARM64::X22,
+            "X23" => RegisterARM64::X23,
+            "X24" => RegisterARM64::X24,
+            "X25" => RegisterARM64::X25,
+            "X26" => RegisterARM64::X26,
+            "X27" => RegisterARM64::X27,
+            "X28" => RegisterARM64::X28,
+            "X29" => RegisterARM64::X29,
+            "X30" => RegisterARM64::X30,
+            "FP" => RegisterARM64::X29,
+            "LR" => RegisterARM64::X30,
+            "SP" => RegisterARM64::SP,
+            "PC" => RegisterARM64::PC,
+            "NZCV" => RegisterARM64::NZCV,
+            other => panic!("[emulator::get_register] Unknown register {}", other)
         }
     }
 }

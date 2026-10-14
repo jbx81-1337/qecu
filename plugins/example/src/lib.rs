@@ -13,9 +13,10 @@ mod host {
     }
 }
 
-const WAIT_EVENT: i64 = 0x800019de;
-const WAIT_TIME: i64 = 0x80000200;
-const STARTUP_DONE: i64 = 0x80003f4c;
+// Addresses of the bare-metal AArch64 firmware under test (adapt to your ELF).
+const WAIT_EVENT: i64 = 0x40001000;
+const WAIT_TIME: i64 = 0x40000200;
+const STARTUP_DONE: i64 = 0x40002000;
 
 static mut HOOKS: [i64; 3] = [0; 3];
 
@@ -44,11 +45,11 @@ pub extern "C" fn qecu_on_code(id: i64, _addr: i64, _size: i32) {
     unsafe {
         if id == HOOKS[0] {
             println!("> IfxCpu_waitEvent. Skipping");
-            host::write_register("D2".as_ptr(), 2, 0);
-            host::set_pc(0x80001a58);
+            host::write_register("X0".as_ptr(), 2, 0);
+            host::set_pc(0x40001040);
         } else if id == HOOKS[1] {
             host::sleep(10);
-            host::set_pc(0x800002e2);
+            host::set_pc(0x40000240);
         } else if id == HOOKS[2] {
             println!("> SoftwareStartup finished, core0_start...");
         }

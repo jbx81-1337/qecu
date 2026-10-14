@@ -1,12 +1,12 @@
 # QECU
 QECU is an attempt to create an ECU emulator framework for the following architectures:
-- Tricore
+- AArch64 (bare-metal firmware ELF, not Linux)
 - Renesas
 - MIPS
 - ARM
 - V850
 
-Currently only Tricore is supported.
+Currently only AArch64 is supported (disassembly via Capstone).
 
 ## INSTALLATION
 ```bash
@@ -66,9 +66,8 @@ Emulator Config
 [unicorn::mem_write] address: 0x0 size: 92
 [unicorn::mem_write] address: 0x0 size: 1319440
 [unicorn::reg_write] register: A0 value: 0x1337
-../rust-sleigh/vendor/share/sleigh/specfiles/Ghidra/Processors
 > Loading tc375 Memory Map
-> Loading Tricore tc375 CPU
+> Loading AArch64 CPU
 > Mempry Map loaded
 > Interceptor initialization.
 Address of ASCLIN1_ACCEN0 is f00007fc

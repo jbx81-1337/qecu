@@ -9,9 +9,10 @@ edition = "2021"
 elf = "0.7.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
-unicorn-engine = "2.0.0"
+unicorn-engine = "2.1"
+capstone = "0.13"
 # rust-sleigh = { path = "../rust-sleigh" }
-rust-sleigh = { git = "https://github.com/jbx81-1337/rust-sleigh" }
+# rust-sleigh = { git = "https://github.com/jbx81-1337/rust-sleigh" }
 
 axum = "*"
 tokio = { version = "1.0", features = ["full"] }
