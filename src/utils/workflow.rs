@@ -3,14 +3,19 @@ use serde::{Serialize, Deserialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowInput {
     pub format: String,
-    pub path: String
+    #[serde(default)]
+    pub path: Option<String>
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowMemMap {
     pub from: u64,
     pub size: u64,
-    pub flags: String
+    pub flags: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub content_address: Option<u64>
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -21,21 +26,29 @@ pub struct WorkflowRegister {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowBoot {
-    pub begin: u64,
-    pub until: u64,
-    pub timeout: u64,
-    pub count: u64
+    #[serde(default)]
+    pub begin: Option<u64>,
+    #[serde(default)]
+    pub until: Option<u64>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    pub count: Option<u64>
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Workflow {
     pub project: String,
-    pub input: WorkflowInput,
+    #[serde(default)]
+    pub input: Option<WorkflowInput>,
     pub mem_map: Vec<WorkflowMemMap>,
     pub registers: Vec<WorkflowRegister>,
-    // pub boot: WorkflowBoot,
+    #[serde(default)]
+    pub boot: Option<WorkflowBoot>,
     pub init_script: String,
+    #[serde(default)]
     pub entry: Option<u64>,
+    #[serde(default)]
     pub until: Option<u64>
 }
 

@@ -1,30 +1,122 @@
 project: Emulator Config
 input:
-  format: elf
-  path: ./firmware/firmware.elf  # bare-metal AArch64 ELF (not Linux), see firmware/build.sh
-    
 mem_map:
-  - from: 0x40000000   # flash / code
-    size: 0x10000000
+  # The main routine reads 0x200 bytes starting at 0x1000.
+  # Contents are unknown; mapping this prevents an unmapped-read fault.
+  - from: 0x00001000
+    size: 0x00001000
+    flags: RW
+
+  # PBL executable, globals, context, transfer list, and provisional stack.
+  #
+  # Observed addresses:
+  #   0x02020000  pointer / handoff slots
+  #   0x02027000  startup entry candidate
+  #   0x02027d60  main routine
+  #   0x02030000  EL3 vector table
+  #   0x02032780  start of conditional zero-fill
+  #   0x02034aa0  end of conditional zero-fill
+  #   0x020352a0  execution-context buffer
+  #   0x02036000  transfer list
+  #   0x02038a1c  observed global
+  #
+  # Region ends at 0x02040000, end-exclusive.
+  - from: 0x02020000
+    size: 0x00016000
+    # The file starts with a 0x1000-byte header; the EL3 startup code is at
+    # file offset 0x1000, which runs at 0x02027000.
+    content: <path_to_project>/pixel_9/firmwares/pbl
+    content_address: 0x02026000
     flags: RWX
 
-  - from: 0x50000000   # SRAM
-    size: 0x10000000
+  # Transfer list handed over by the previous boot stage: a tag-1 entry with the
+  # TOC DTB followed by the memory-carveout DTB.
+  - from: 0x02036000
+    size: 0x00002000
+    content: <path_to_project>/pixel_9/firmwares/gcf
+    flags: RW
+
+  # Remainder of the PBL region, including the provisional stack.
+  - from: 0x02038000
+    size: 0x00008000
     flags: RWX
 
-  - from: 0x60000000   # peripherals
-    size: 0x10000000
+  # Broad MMIO backing for initial bring-up.
+  # Covers the observed peripheral accesses from 0x10000000
+  # through the 0x29c5.... range (the PBL initialises a table of 29
+  # peripheral bases between 0x101f0000 and 0x29c50000).
+  #
+  # This is NOT ordinary RAM on the real device.
+  # Polling/status registers will require hooks or device behavior.
+  - from: 0x10000000
+    size: 0x07000000
+    flags: RW
+
+  # AOC SRAM: BL2 image (0x17000000), BL2_SG_BASE, ACPM, ECT, DBGC, AOC_PAD and
+  # the BL2 stack (0x17100000), per the memory-carveout DTB.
+  - from: 0x17000000
+    size: 0x02000000
+    content: <path_to_project>/pixel_9/firmwares/bl2
+    flags: RWX
+
+  # Pristine copy of bl2 used by the plugin's emulated ROM storage reads.
+  - from: 0x80000000
+    size: 0x00100000
+    content: <path_to_project>/pixel_9/firmwares/bl2
+    flags: RW
+
+  - from: 0x80100000
+    size: 0x1ff00000
+    flags: RW
+
+  - from: 0xa0100000
+    size: 0x1ff00000
+    flags: RW
+
+  # DRAM (the DMC init is skipped, so it is just plain RAM here).
+  - from: 0xc0000000
+    size: 0x3d000000
+    flags: RW
+
+  # GSA shared memory; BL2 checks its magic at +0x400.
+  - from: 0xa0000000
+    size: 0x00100000
+    flags: RW
+
+  - from: 0x19000000
+    size: 0x11000000
+    flags: RW
+
+  # RAM-log metadata and ring buffer.
+  #
+  #   0xfd90a010  write index
+  #   0xfd90a014  additional logging flag
+  #   0xfd90a018  wrap flag
+  #   0xfd90a020  buffer start
+  #   0xfd90bfff  last buffer byte
+  - from: 0xfd90a000
+    size: 0x00002000
     flags: RW
 
 registers:
+  # Enter EL3h (M=0b1101) with DAIF masked; the PBL programs EL3 system
+  # registers. Must come before SP so SP is written for EL3.
+  - name: 'PSTATE'
+    value: 0x3cd
+
+  # Provisional stack for bring-up only.
+  # Inspect FUN_020270a0 to recover the firmware's actual stack setup.
+  # This address lies inside the region above and is 16-byte aligned.
   - name: 'SP'
-    value: 0x5ffff000
+    value: 0x0203f000
 
-# boot:
-#   begin: 0x80003d10
-#   until: 0x80003f2a
-#   timout: 0x00
-#   count: 0x00
+boot:
+  begin: 0x02027000
+  # No validated successful stopping address yet.
+  # until: ...
+  # timout: 0x00
+  # count: 0x00
 
-init_script: ./plugins/example/target/wasm32-wasip1/release/example.wasm
-sleigh_path: ../rust-sleigh/vendor/share/sleigh/specfiles/Ghidra/Processors
+init_script: <path_to_project>/pixel_9/qecu_pixel_9/target/wasm32-wasip1/release/pixel_9_plugin.wasm
+
+# sleigh_path: ../rust-sleigh/vendor/share/sleigh/specfiles/Ghidra/Processors

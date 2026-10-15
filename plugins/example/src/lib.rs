@@ -2,13 +2,15 @@
 //!   rustup target add wasm32-wasip1
 //!   cargo build --release --target wasm32-wasip1   (inside plugins/example)
 
-mod host {
+mod Interceptor {
     #[link(wasm_import_module = "qecu")]
     extern "C" {
         pub fn add_code_hook(begin: i64, size: i64) -> i64;
         pub fn on_event(ptr: *const u8, len: usize);
         pub fn read_register(ptr: *const u8, len: usize) -> i64;
         pub fn write_register(ptr: *const u8, len: usize, value: i64);
+        pub fn read_memory(ptr: *const u8, len: usize) -> i64;
+        pub fn write_memory(ptr: *const u8, len: usize, value: i64);
         pub fn set_pc(addr: i64);
         pub fn sleep(ms: i64);
         pub fn stop();
@@ -37,12 +39,12 @@ pub extern "C" fn qecu_alloc(len: usize) -> *mut u8 {
 pub extern "C" fn qecu_init() {
     println!("> Interceptor initialization.");
     unsafe {
-        HOOKS[0] = host::add_code_hook(SKIP_ME, 4);
-        HOOKS[1] = host::add_code_hook(AFTER_SKIP, 4);
-        HOOKS[2] = host::add_code_hook(START, 4);
-        HOOKS[3] = host::add_code_hook(END, 4);
+        HOOKS[0] = Interceptor::add_code_hook(SKIP_ME, 4);
+        HOOKS[1] = Interceptor::add_code_hook(AFTER_SKIP, 4);
+        HOOKS[2] = Interceptor::add_code_hook(START, 4);
+        HOOKS[3] = Interceptor::add_code_hook(END, 4);
         let ev = "can-recv";
-        host::on_event(ev.as_ptr(), ev.len());
+        Interceptor::on_event(ev.as_ptr(), ev.len());
     }
 }
 
@@ -51,16 +53,16 @@ pub extern "C" fn qecu_on_code(id: i64, _addr: i64, _size: i32) {
     unsafe {
         if id == HOOKS[0] {
             println!("> skip_me hit, skipping `mov x4, #0xdead` and `mov x5, #0xbeef`");
-            host::write_register("X5".as_ptr(), 2, 0x10);
-            host::set_pc(AFTER_SKIP);
+            Interceptor::write_register("X5".as_ptr(), 2, 0x10);
+            Interceptor::set_pc(AFTER_SKIP);
         } else if id == HOOKS[1] {
-            println!("> after_skip reached, X3 = {}", host::read_register("X3".as_ptr(), 2));
+            println!("> after_skip reached, X3 = {}", Interceptor::read_register("X3".as_ptr(), 2));
         } else if id == HOOKS[2] {
             println!("> firmware start");
-            host::sleep(10);
+            Interceptor::sleep(10);
         } else if id == HOOKS[3] {
             println!("> firmware_end reached, stopping emulation");
-            host::stop();
+            Interceptor::stop();
         }
     }
 }

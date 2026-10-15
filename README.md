@@ -18,13 +18,28 @@ cargo build
 ```
 
 ## Features
-Qecu should be able to support mainly three formats: Elf, Intel-Hex and raw binary. Currently only the ELF format is implemented.
+Qecu should be able to support mainly three formats: ELF, Intel-Hex and raw binary. ELF and raw binary formats are implemented.
 
 The configuration of qecu start with a `YAML` file to be used as config. inside the `YAML` file is specified:
 - Firmware location and format
 - Memory Map
 - Register values on Boot time
 - Start and Stop address for the emulation
+
+Raw binary files have no embedded load address. A raw file can be attached to a memory map entry with `content`; its bytes are loaded at that entry's `from` address, or at `content_address` if set (it must fall inside the region):
+
+```yaml
+mem_map:
+  - from: 0x02000000
+    size: 0x00040000
+    flags: RWX
+    content: ./firmware.bin
+
+boot:
+  begin: 0x02027000
+```
+
+`input` is optional and can be omitted (or left empty) when all firmware comes from `mem_map.content`. If `input` is set, it is loaded first and `content` regions are written afterwards, so they take precedence. A raw `input.path` is loaded at address `0`. The execution start is `entry`, then `boot.begin`; otherwise the ELF entry, or the first `content` region's address (or `0`) for raw/no input.
 
 One testing example is present with the name `config.yml`
 
