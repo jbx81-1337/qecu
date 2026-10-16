@@ -1,10 +1,13 @@
 use capstone::prelude::*;
-use unicorn_engine::{Arm64Insn, RegisterARM64, RegisterARM64CP, Unicorn};
+use unicorn_engine::{Arm64Insn, RegisterARM64, Unicorn};
 use unicorn_engine::unicorn_const::{Arch, HookType, Mode, Prot};
 use crate::utils::{self, workflow::Workflow};
+use crate::debug_log;
 use std::sync::{Arc, Mutex};
 use std::fmt;
 use super::wasm_engine::WasmEngine;
+use super::mte;
+use super::sysreg;
 
 struct UcWrapper <'a>{
     uc: Unicorn<'a, ()>
@@ -98,19 +101,19 @@ impl<'a> Emulator <'static>{
                 }
                 uc.mem_map(mem_map.from, mem_map.size, perms)
                     .expect(format!("[unicorn::mem_map] Failed to write data at {:#01x} of size {}\n", mem_map.from, mem_map.size).as_str());
-                println!("[unicorn::mem_map] address: {:#01x} size: {}", mem_map.from, mem_map.size);
+                debug_log!("[unicorn::mem_map] address: {:#01x} size: {}", mem_map.from, mem_map.size);
             }
         
             for code_section in code_sections {
                 uc.mem_write(code_section.address, &code_section.data)
                     .expect(format!("[unicorn::mem_wirte] Failed to write data at {:#01x} of size {}\n", code_section.address, code_section.size).as_str());
-                println!("[unicorn::mem_write] address: {:#01x} size: {}", code_section.address, code_section.size);
+                debug_log!("[unicorn::mem_write] address: {:#01x} size: {}", code_section.address, code_section.size);
             }
 
             for register in registers {
                 uc.reg_write(Self::get_register(&register.name), register.value)
                     .expect(format!("[unicorn::reg_write] Failed to write register {} with data {:#01x}\n", register.name, register.value).as_str());
-                println!("[unicorn::reg_write] register: {} value: {:#01x}", register.name, register.value);
+                debug_log!("[unicorn::reg_write] register: {} value: {:#01x}", register.name, register.value);
                 if register.name.eq_ignore_ascii_case("PSTATE") {
                     Self::rebuild_cpu_flags(uc);
                 }
@@ -161,17 +164,30 @@ impl<'a> Emulator <'static>{
     }
 
     pub fn read_memory(&self, address: u64, size: usize) -> Vec<u8>{
-        let ret = self.mut_uc().mem_read_as_vec(address, size)
-            .expect("[emulator::read_memory] Cannot write register\n");
-        return ret;
+        match self.mut_uc().mem_read_as_vec(address, size) {
+            Ok(v) => v,
+            Err(e) => {
+                debug_log!(
+                    "[emulator::read_memory] READ_UNMAPPED address={:#x} size={} ({:?})",
+                    address, size, e
+                );
+                vec![0u8; size]
+            }
+        }
     }
 
     pub fn write_memory(&self, address: u64, data: Vec<u8>) -> u64{
-        let data = &data; // b: &Vec<u8>
-        let data: &[u8] = &data; // c: &[u8]
-        self.mut_uc().mem_write(address, data)
-            .expect("[emulator::write_memory] Cannot write register\n");
-        return 0;
+        let data: &[u8] = &data;
+        match self.mut_uc().mem_write(address, data) {
+            Ok(()) => 0,
+            Err(e) => {
+                debug_log!(
+                    "[emulator::write_memory] WRITE_UNMAPPED address={:#x} size={} ({:?})",
+                    address, data.len(), e
+                );
+                1
+            }
+        }
     }
 
     pub fn set_pc(&self, addr: u64) {
@@ -207,37 +223,41 @@ impl<'a> Emulator <'static>{
         }
 
         let mut uc = self.mut_uc();   
-        let callback = move |_uc: &mut Unicorn<'_, ()>, addr: u64, size: u32| {
+        let callback = move |uc: &mut Unicorn<'_, ()>, addr: u64, size: u32| {
+            // Emulate Memory Tagging Extension instructions (Unicorn does not
+            // model them and raises an exception on the first one). The logic
+            // lives in `mte::emulate_insn`.
+            if let Some(insn) = uc
+                .mem_read_as_vec(addr, 4)
+                .ok()
+                .and_then(|b| <[u8; 4]>::try_from(b.as_slice()).ok())
+                .map(|b| u32::from_le_bytes(b))
+            {
+                if mte::emulate_insn(uc, addr, insn) {
+                    return;
+                }
+            }
             self.on_code_hook(addr, size);
         };
         uc.add_code_hook(0, u64::MAX, callback).expect("[emulator::run] Cannot install default code_hook");
         uc.add_mem_hook(HookType::MEM_UNMAPPED, 0, u64::MAX, |uc, mem_type, address, size, value| {
-            println!(
+            debug_log!(
                 "[emulator::mem] {:?} address={:#x} size={} value={:#x} pc={:#x}",
                 mem_type, address, size, value, uc.pc_read().unwrap_or(0)
             );
             false
         }).expect("[emulator::run] Cannot install unmapped memory hook");
-        // Skip system registers Unicorn does not model instead of aborting emulation.
+        // System-register (MRS/MSR) handling lives in `sysreg::handle`. Unicorn
+        // only natively models a subset of registers, and its MRS/MSR emulation
+        // does not advance the PC when an instruction is skipped, so we intercept
+        // every one: forward the MMU registers to Unicorn, round-trip MTE/TPIDR,
+        // and emulate the handful of values the boot firmware depends on.
+        let sysreg_state = sysreg::SysregState::new();
         for insn in [Arm64Insn::UC_ARM64_INS_MSR, Arm64Insn::UC_ARM64_INS_MRS] {
             let is_read = insn == Arm64Insn::UC_ARM64_INS_MRS;
+            let state = sysreg_state.clone();
             uc.add_insn_sys_hook_arm64(insn, 1, 0, move |uc, reg, cp| {
-                if !Self::sysreg_unsupported(cp) {
-                    return false;
-                }
-                println!(
-                    "[emulator::sysreg] unsupported {} s{}_{}_c{}_c{}_{} at pc={:#x}, ignored",
-                    if is_read { "MRS" } else { "MSR" },
-                    cp.op0, cp.op1, cp.crn, cp.crm, cp.op2,
-                    uc.pc_read().unwrap_or(0)
-                );
-                if is_read {
-                    let _ = uc.reg_write(reg, 0);
-                }
-                // Unicorn does not advance the PC when an instruction is skipped.
-                let pc = uc.pc_read().unwrap_or(0);
-                let _ = uc.set_pc(pc + 4);
-                true
+                sysreg::handle(uc, reg, cp, is_read, &state)
             }).expect("[emulator::run] Cannot install system register hook");
         }
         if let Err(error) = uc.emu_start(self.entry, self.until, 0x00, 0x00) {
@@ -249,7 +269,7 @@ impl<'a> Emulator <'static>{
             let lr = uc.reg_read(RegisterARM64::X30).unwrap_or(0);
             panic!("[emulator::run] Emulation failed: {:?} at pc={:#x} lr={:#x} bytes={:02x?} insn=[{}]", error, pc, lr, insn, disas);
         }
-        println!("[emulator::run] Emulation finished, pc={:#x}", uc.pc_read().unwrap());
+        debug_log!("[emulator::run] Emulation finished, pc={:#x}", uc.pc_read().unwrap());
     }
 
     pub fn disas(&self, code: Vec<u8>, addr: u64, _size: u32) -> Vec<DisasLine> {
@@ -262,17 +282,6 @@ impl<'a> Emulator <'static>{
             Err(_) => Vec::new()
         };
         result
-    }
-
-    // System registers Unicorn does not model: RAS error records (ERRSELR_EL1,
-    // ERXCTLR_EL1, ...), implementation-defined registers (crn 11 / 15) and the
-    // GICv3 CPU interface (ICC_PMR_EL1, ICC_SRE_ELx, ICC_IGRPEN*, ...).
-    fn sysreg_unsupported(cp: &RegisterARM64CP) -> bool {
-        let ras = cp.op1 == 0 && cp.crn == 5 && (3..=5).contains(&cp.crm);
-        let impdef = cp.crn == 11 || cp.crn == 15;
-        let gic_pmr = cp.op1 == 0 && cp.crn == 4 && cp.crm == 6 && cp.op2 == 0;
-        let gic_icc = cp.crn == 12 && cp.crm >= 8;
-        cp.op0 == 3 && (ras || impdef || gic_pmr || gic_icc)
     }
 
     // Unicorn only refreshes its cached exception-level flags on a CP_REG write,

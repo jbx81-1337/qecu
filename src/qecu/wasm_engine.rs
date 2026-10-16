@@ -132,6 +132,9 @@ fn link_host_api(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     linker.func_wrap("qecu", "sleep", |_c: Caller<'_, HostState>, ms: i64| {
         sleep(time::Duration::from_millis(ms.max(0) as u64));
     })?;
+    linker.func_wrap("qecu", "debug_enabled", |_c: Caller<'_, HostState>| -> i32 {
+        crate::logging::debug_enabled() as i32
+    })?;
     linker.func_wrap("qecu", "get_cpu_symbol", |mut c: Caller<'_, HostState>, cp: i32, cl: i32, sp: i32, sl: i32| -> wasmtime::Result<i32> {
         let cpu = read_guest_str(&mut c, cp, cl)?;
         let symbol = read_guest_str(&mut c, sp, sl)?;
