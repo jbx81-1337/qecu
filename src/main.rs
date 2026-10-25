@@ -2,9 +2,11 @@ mod qecu;
 mod utils;
 mod logging;
 use crate::qecu::api;
+use crate::qecu::channel::{ChannelBroker, ChannelConfig, ChannelTransport, ZmqTransport};
 use crate::qecu::emulator::Emulator;
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::thread::spawn;
 
 fn print_usage() {
@@ -62,7 +64,50 @@ async fn main() {
     let wf = utils::workflow::Workflow::new(config);
     println!("{}", wf.project);
 
-    let emulator: Emulator<'static> = Emulator::new(wf);
+    // Channel broker: validates/routes frames; transport tasks own the sockets.
+    let channel_configs: Vec<ChannelConfig> = wf.channels.clone();
+    let broker: Arc<Mutex<ChannelBroker>> =
+        Arc::new(Mutex::new(ChannelBroker::new(channel_configs.clone())));
+    for cfg in channel_configs {
+        if cfg.transport != "zeromq" {
+            eprintln!("qecu: channel '{}' has unsupported transport '{}'", cfg.name, cfg.transport);
+            continue;
+        }
+        let endpoint = cfg
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| format!("ipc:///tmp/qecu-{}.sock", cfg.name));
+        let broker = broker.clone();
+        let name = cfg.name.clone();
+        spawn(move || {
+            let mut transport = match ZmqTransport::bind(&endpoint) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("qecu: channel '{name}' bind failed: {e}");
+                    return;
+                }
+            };
+            eprintln!("qecu: channel '{name}' listening on {endpoint}");
+            loop {
+                if let Ok(Some(msg)) = transport.recv(50) {
+                    let replies = broker.lock().unwrap().process_inbound(msg);
+                    for reply in replies {
+                        if let Err(e) = transport.send(reply) {
+                            eprintln!("qecu: channel '{name}' send failed: {e}");
+                        }
+                    }
+                }
+                let outbound = broker.lock().unwrap().drain_outbound();
+                for msg in outbound {
+                    if let Err(e) = transport.send(msg) {
+                        eprintln!("qecu: channel '{name}' send failed: {e}");
+                    }
+                }
+            }
+        });
+    }
+
+    let emulator: Emulator<'static> = Emulator::new(wf, broker);
     let emustart = emulator.clone();
 
     spawn(move || {

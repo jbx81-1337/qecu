@@ -69,6 +69,9 @@ pub fn emulate_insn(uc: &mut Unicorn<'_, ()>, addr: u64, insn: u32) -> bool {
     } else if insn & 0xff00_0000 == 0xd900_0000 {
         // stg / st2g / stzg / stz2g / ldg / stgm / ldgm: the whole 0xd9xxxxxx
         // opcode space is MTE tag-memory access. No-op in a tag-less emulator.
+    } else if insn & 0xffff_f01f == 0xd503_401f {
+        // msr PState.TCO, #imm: Tag Check Override. MTE is absent, so this is
+        // a no-op (the IRQ return path executes it unconditionally).
     } else if insn & 0xfe40_0000 == 0x6800_0000 {
         // stgp Xt1, Xt2, [Xn|SP{, #simm}]: store pair + allocation tags.
         // Emulate the data store (two 64-bit registers); tags ignored. Bit 25

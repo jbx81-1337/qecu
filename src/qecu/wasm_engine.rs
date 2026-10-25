@@ -16,7 +16,9 @@ use wasmtime::{Caller, Engine, Instance, Linker, Memory, Module, Store, TypedFun
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::WasiCtxBuilder;
 use std::{thread::sleep, time};
+use std::sync::{Arc, Mutex};
 
+use super::channel::{ChannelBroker, ChannelFrame, ChannelKind};
 use super::emulator::Emulator;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -37,6 +39,7 @@ struct HostState {
     code_hooks: Vec<CodeHook>,
     on_events: Vec<EventCallback>,
     next_id: u64,
+    broker: Option<Arc<Mutex<ChannelBroker>>>,
 }
 
 struct Guest {
@@ -45,6 +48,7 @@ struct Guest {
     memory: Memory,
     on_code: Option<TypedFunc<(i64, i64, i32), ()>>,
     on_event: Option<TypedFunc<(i32, i32, i32, i32), ()>>,
+    on_channel: Option<TypedFunc<(i32, i32, i32, i32, i64, i32, i32, i32), i32>>,
 }
 
 pub struct WasmEngine {
@@ -54,6 +58,7 @@ pub struct WasmEngine {
     guest: Option<Guest>,
     code_hooks: Vec<CodeHook>,
     on_events: Vec<EventCallback>,
+    broker: Option<Arc<Mutex<ChannelBroker>>>,
 }
 
 // Emulator is shared across threads behind mutexes, same contract as before.
@@ -135,6 +140,42 @@ fn link_host_api(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     linker.func_wrap("qecu", "debug_enabled", |_c: Caller<'_, HostState>| -> i32 {
         crate::logging::debug_enabled() as i32
     })?;
+    // channel_subscribe(channel_ptr, channel_len) -> 0 on success.
+    // Channels are configured host-side, so subscription only records intent.
+    linker.func_wrap("qecu", "channel_subscribe", |mut c: Caller<'_, HostState>, p: i32, l: i32| -> wasmtime::Result<i32> {
+        let channel = read_guest_str(&mut c, p, l)?;
+        eprintln!("[channel] plugin subscribed to '{channel}'");
+        Ok(0)
+    })?;
+    // channel_send(channel_ptr, channel_len, session_ptr, session_len, sequence,
+    //              kind, payload_ptr, payload_len) -> 0 on success, -1 on error.
+    // Queues a frame for delivery to the originating session; never blocks.
+    linker.func_wrap("qecu", "channel_send", |mut c: Caller<'_, HostState>, cp: i32, cl: i32, sp: i32, sl: i32, seq: i64, kind: i32, pp: i32, pl: i32| -> wasmtime::Result<i32> {
+        let channel = read_guest_str(&mut c, cp, cl)?;
+        let session_id = read_guest(&mut c, sp, sl)?;
+        let payload = read_guest(&mut c, pp, pl)?;
+        let kind = ChannelKind::from_byte(kind as u8).unwrap_or(ChannelKind::Error);
+        let frame = ChannelFrame {
+            channel: channel.clone(),
+            session_id,
+            sequence: seq as u64,
+            kind,
+            payload,
+        };
+        let broker = c
+            .data()
+            .broker
+            .clone()
+            .ok_or_else(|| wasmtime::format_err!("channel broker not attached"))?;
+        let result = broker.lock().unwrap().send_to_session(frame);
+        match result {
+            Ok(()) => Ok(0),
+            Err(e) => {
+                eprintln!("[channel] channel_send failed: {e}");
+                Ok(-1)
+            }
+        }
+    })?;
     linker.func_wrap("qecu", "get_cpu_symbol", |mut c: Caller<'_, HostState>, cp: i32, cl: i32, sp: i32, sl: i32| -> wasmtime::Result<i32> {
         let cpu = read_guest_str(&mut c, cp, cl)?;
         let symbol = read_guest_str(&mut c, sp, sl)?;
@@ -163,11 +204,15 @@ impl WasmEngine {
         let engine = Engine::default();
         let module = Module::from_file(&engine, &plugin_path)
             .unwrap_or_else(|e| panic!("[wasm_engine::new] Cannot load plugin {}: {}", plugin_path, e));
-        WasmEngine { engine, module, emulator: None, guest: None, code_hooks: Vec::new(), on_events: Vec::new() }
+        WasmEngine { engine, module, emulator: None, guest: None, code_hooks: Vec::new(), on_events: Vec::new(), broker: None }
     }
 
     pub fn set_emulator(&mut self, emulator: Emulator<'static>) {
         self.emulator = Some(emulator);
+    }
+
+    pub fn set_broker(&mut self, broker: Arc<Mutex<ChannelBroker>>) {
+        self.broker = Some(broker);
     }
 
     /// Instantiate the plugin and run `qecu_init`.
@@ -184,6 +229,7 @@ impl WasmEngine {
             code_hooks: Vec::new(),
             on_events: Vec::new(),
             next_id: 0,
+            broker: self.broker.clone(),
         });
         let instance: Instance = linker
             .instantiate(&mut store, &self.module)
@@ -201,9 +247,10 @@ impl WasmEngine {
         }
         let on_code = instance.get_typed_func(&mut store, "qecu_on_code").ok();
         let on_event = instance.get_typed_func(&mut store, "qecu_on_event").ok();
+        let on_channel = instance.get_typed_func(&mut store, "qecu_on_channel").ok();
         self.code_hooks = store.data().code_hooks.clone();
         self.on_events = store.data().on_events.clone();
-        self.guest = Some(Guest { store, alloc, memory, on_code, on_event });
+        self.guest = Some(Guest { store, alloc, memory, on_code, on_event, on_channel });
     }
 
     pub fn on_code_hook(&mut self, addr: u64, size: u32) {
@@ -241,6 +288,25 @@ impl WasmEngine {
 
     pub fn get_event_hooks(&self) -> Vec<EventCallback> {
         self.on_events.clone()
+    }
+
+    /// Deliver an inbound channel frame (host -> guest) to the plugin's
+    /// `qecu_on_channel` export.  Returns true if the plugin handled it.
+    pub fn on_channel(&mut self, frame: &ChannelFrame) -> bool {
+        let guest = match self.guest.as_mut() { Some(g) => g, None => return false };
+        let on_channel = match guest.on_channel.clone() { Some(f) => f, None => return false };
+        let mut put = |s: &[u8]| -> (i32, i32) {
+            let ptr = guest.alloc.call(&mut guest.store, s.len() as i32).expect("[wasm_engine::on_channel] qecu_alloc failed");
+            guest.memory.write(&mut guest.store, ptr as u32 as usize, s).expect("[wasm_engine::on_channel] write failed");
+            (ptr, s.len() as i32)
+        };
+        let (cp, cl) = put(frame.channel.as_bytes());
+        let (sp, sl) = put(&frame.session_id);
+        let (pp, pl) = put(&frame.payload);
+        let ret = on_channel
+            .call(&mut guest.store, (cp, cl, sp, sl, frame.sequence as i64, frame.kind.as_byte() as i32, pp, pl))
+            .unwrap_or_else(|e| panic!("[wasm_engine::on_channel] qecu_on_channel failed: {}", e));
+        ret != 0
     }
 }
 

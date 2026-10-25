@@ -8,6 +8,7 @@ use std::fmt;
 use super::wasm_engine::WasmEngine;
 use super::mte;
 use super::sysreg;
+use super::channel::{ChannelBroker, ChannelFrame};
 
 struct UcWrapper <'a>{
     uc: Unicorn<'a, ()>
@@ -42,12 +43,13 @@ pub struct Emulator <'a>{
     entry: u64,
     until: u64,
     _marker: std::marker::PhantomData<&'a ()>,
-    pub interceptor: Arc<Mutex<Option<WasmEngine>>>
+    pub interceptor: Arc<Mutex<Option<WasmEngine>>>,
+    pub broker: Arc<Mutex<ChannelBroker>>
 }
 
 impl<'a> Emulator <'static>{
 
-    pub fn new(workflow: Workflow) -> Emulator<'static> {
+    pub fn new(workflow: Workflow, broker: Arc<Mutex<ChannelBroker>>) -> Emulator<'static> {
         let mut unicorn: Unicorn<'_, ()> = Unicorn::new(Arch::ARM64, Mode::LITTLE_ENDIAN).expect("failed to initialize Unicorn instance");
         // The default CPU lacks newer system registers (e.g. RAS ERRSELR_EL1).
         unicorn.ctl_set_cpu_model(unicorn_engine::Arm64CpuModel::MAX as i32)
@@ -140,7 +142,8 @@ impl<'a> Emulator <'static>{
             entry,
             until: until,
             _marker: std::marker::PhantomData,
-            interceptor: Arc::new(Mutex::new(Some(WasmEngine::new(init_script))))
+            interceptor: Arc::new(Mutex::new(Some(WasmEngine::new(init_script)))),
+            broker
         }
     }
 
@@ -219,6 +222,7 @@ impl<'a> Emulator <'static>{
             let mut mutex_guard = self.interceptor.lock().unwrap();
             let intercept = mutex_guard.as_mut().unwrap();
             intercept.set_emulator(self.clone());
+            intercept.set_broker(self.broker.clone());
             intercept.init();
         }
 
@@ -260,16 +264,80 @@ impl<'a> Emulator <'static>{
                 sysreg::handle(uc, reg, cp, is_read, &state)
             }).expect("[emulator::run] Cannot install system register hook");
         }
-        if let Err(error) = uc.emu_start(self.entry, self.until, 0x00, 0x00) {
-            let pc = uc.pc_read().unwrap_or(0);
-            let insn = uc.mem_read_as_vec(pc, 4).unwrap_or_default();
-            let disas = self.disas(insn.clone(), pc, 4).into_iter()
-                .map(|line| format!("{} {}", line.mnemonic, line.body))
-                .collect::<Vec<_>>().join("; ");
-            let lr = uc.reg_read(RegisterARM64::X30).unwrap_or(0);
-            panic!("[emulator::run] Emulation failed: {:?} at pc={:#x} lr={:#x} bytes={:02x?} insn=[{}]", error, pc, lr, insn, disas);
+        // Paused/pump lifecycle: the emulator thread is the sole owner of
+        // Unicorn execution and the plugin callbacks.  `emu_start` returns when
+        // the guest executes WFI (Unicorn halts on WFI, PC advanced past it) or
+        // when the plugin calls `stop()`.  Between slices we drain queued
+        // inbound channel frames into the plugin and let the plugin's
+        // `channel_send` queue outbound frames into the broker (which the
+        // transport pump then routes back to the originating client).
+        let mut first_slice = true;
+        loop {
+            // Resume from the current PC (past WFI on subsequent slices).
+            let start_pc = if first_slice {
+                self.entry
+            } else {
+                uc.pc_read().unwrap_or(self.entry)
+            };
+            first_slice = false;
+            if let Err(error) = uc.emu_start(start_pc, self.until, 0x00, 0x00) {
+                let pc = uc.pc_read().unwrap_or(0);
+                let insn = uc.mem_read_as_vec(pc, 4).unwrap_or_default();
+                let disas = self.disas(insn.clone(), pc, 4).into_iter()
+                    .map(|line| format!("{} {}", line.mnemonic, line.body))
+                    .collect::<Vec<_>>().join("; ");
+                let lr = uc.reg_read(RegisterARM64::X30).unwrap_or(0);
+                panic!("[emulator::run] Emulation failed: {:?} at pc={:#x} lr={:#x} bytes={:02x?} insn=[{}]", error, pc, lr, insn, disas);
+            }
+
+            // Drain validated inbound frames for the plugin (host -> guest).
+            let mut frames: Vec<ChannelFrame> = Vec::new();
+            {
+                let mut broker = self.broker.lock().unwrap();
+                while let Some(frame) = broker.recv_for_plugin() {
+                    frames.push(frame);
+                }
+            }
+            let mut delivered = false;
+            if !frames.is_empty() {
+                let mut mutex_guard = self.interceptor.lock().unwrap();
+                let intercept = mutex_guard.as_mut().unwrap();
+                for frame in &frames {
+                    delivered |= intercept.on_channel(frame);
+                }
+            }
+
+            // Advance the free-running counter and service the ARM generic
+            // timer: LK's scheduler programs CNTP_CVAL/CNTP_CTL and expects a
+            // timer IRQ (PPI 30) to wake sleeping threads. The emulator does
+            // not model the GIC, so we take the IRQ exception by hand once the
+            // deadline passes.
+            sysreg_state.tick(0x100_000);
+            if sysreg_state.timer_expired() {
+                sysreg_state.timer_pending.store(true, std::sync::atomic::Ordering::Relaxed);
+                sysreg_state.timer_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+                let pc = uc.pc_read().unwrap_or(self.entry);
+                let pstate = uc.reg_read(RegisterARM64::PSTATE).unwrap_or(0);
+                debug_log!("[emulator::timer] IRQ: save pc={pc:#x} pstate={pstate:#x} -> vector={:#x}", sysreg::IRQ_VECTOR);
+                // Save the interrupted context (ELR/SPSR) and enter the IRQ
+                // vector at EL1h with IRQs masked. SPSR_EL1 is written via the
+                // CP_REG interface (Unicorn's eret reads it from there).
+                let _ = uc.reg_write(RegisterARM64::ELR_EL1, pc);
+                sysreg_state.spsr_el1.store(pstate, std::sync::atomic::Ordering::Relaxed);
+                sysreg::cp_reg_write(&mut uc, 4, 0, 3, 0, 0, pstate);
+                let _ = uc.set_pc(sysreg::IRQ_VECTOR);
+                let new_pstate = (pstate & 0xF000_0000) | 0x385; // keep NZCV, EL1h + DAIF masked
+                let _ = uc.reg_write(RegisterARM64::PSTATE, new_pstate);
+                continue;
+            }
+
+            // The plugin may have queued outbound frames via `channel_send`
+            // while delivering; the transport pump drains them.  If we
+            // delivered inbound work, resume immediately; otherwise poll.
+            if !delivered {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
         }
-        debug_log!("[emulator::run] Emulation finished, pc={:#x}", uc.pc_read().unwrap());
     }
 
     pub fn disas(&self, code: Vec<u8>, addr: u64, _size: u32) -> Vec<DisasLine> {

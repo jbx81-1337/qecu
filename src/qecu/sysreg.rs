@@ -12,13 +12,21 @@
 //! * returns zero for everything else, logging each unique access once.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use unicorn_engine::{RegisterARM64, RegisterARM64CP, Unicorn};
 
 use crate::debug_log;
 
 use super::mte;
+
+/// ARM generic timer PPI (private peripheral interrupt) id.
+pub const TIMER_PPI: u64 = 30;
+/// Spurious interrupt id returned by ICC_IAR1_EL1 when nothing is pending.
+const ICC_SPURIOUS: u64 = 0x3ff;
+/// The AArch64 IRQ exception vector (VBAR_EL1 + 0x80 for EL1h entries, IRQ is
+/// the second entry at offset 0x80). LK sets VBAR_EL1 = 0xffff0000f8801000.
+pub const IRQ_VECTOR: u64 = 0xffff_0000_f880_1280u64;
 
 /// State shared by the system-register hook. All fields are `Arc` so the struct
 /// is cheaply cloneable into each hook closure.
@@ -28,6 +36,15 @@ pub struct SysregState {
     pub tpidr: Arc<Mutex<HashMap<(u32, u32, u32, u32, u32), u64>>>,
     pub mte: Arc<Mutex<mte::MteState>>,
     pub logged: Arc<Mutex<HashSet<(u64, u32, u32, u32, u32, u32)>>>,
+    // ARM generic timer emulation. `timer_deadline` is the CNTPCT value at
+    // which the physical timer fires; `timer_enabled` mirrors CNTP_CTL_EL0.
+    pub timer_deadline: Arc<AtomicU64>,
+    pub timer_enabled: Arc<AtomicBool>,
+    pub timer_pending: Arc<AtomicBool>,
+    /// Last SPSR_EL1 value written via `msr spsr_el1`. Unicorn's `eret` reads
+    /// SPSR from its CP_REG space, but `mrs spsr_el1` cannot read it back, so
+    /// we round-trip it ourselves.
+    pub spsr_el1: Arc<AtomicU64>,
 }
 
 impl SysregState {
@@ -37,7 +54,27 @@ impl SysregState {
             tpidr: Arc::new(Mutex::new(HashMap::new())),
             mte: Arc::new(Mutex::new(mte::MteState::default())),
             logged: Arc::new(Mutex::new(HashSet::new())),
+            timer_deadline: Arc::new(AtomicU64::new(u64::MAX)),
+            timer_enabled: Arc::new(AtomicBool::new(false)),
+            timer_pending: Arc::new(AtomicBool::new(false)),
+            spsr_el1: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Advances the free-running counter and returns the new value.
+    pub fn tick(&self, delta: u64) -> u64 {
+        self.counter.fetch_add(delta, Ordering::Relaxed) + delta
+    }
+
+    pub fn counter_now(&self) -> u64 {
+        self.counter.load(Ordering::Relaxed)
+    }
+
+    /// Returns true when the timer is armed and its deadline has passed. The
+    /// caller is responsible for actually taking the IRQ exception.
+    pub fn timer_expired(&self) -> bool {
+        self.timer_enabled.load(Ordering::Relaxed)
+            && self.counter_now() >= self.timer_deadline.load(Ordering::Relaxed)
     }
 }
 
@@ -71,7 +108,10 @@ pub fn handle(
                 }
                 .unwrap_or(0)
             } else {
-                0
+                // SPSR reads must round-trip the value we wrote via CP_REG so
+                // the exception return path restores the saved PSTATE. Unicorn
+                // cannot read SPSR back, so use our tracked copy.
+                state.spsr_el1.load(Ordering::Relaxed)
             };
             let _ = uc.reg_write(reg, value);
         } else if let Ok(value) = uc.reg_read(reg) {
@@ -84,6 +124,9 @@ pub fn handle(
                 };
                 let _ = uc.reg_write(target, value);
             } else {
+                if el_index == 1 {
+                    state.spsr_el1.store(value, Ordering::Relaxed);
+                }
                 cp_reg_write(uc, 4, 0, 3, cp.op1, 0, value);
             }
         }
@@ -130,6 +173,77 @@ pub fn handle(
         }
     }
 
+    // ARM generic timer + GICv3 CPU interface (LK's scheduler depends on both).
+    let key = (cp.op0, cp.op1, cp.crn, cp.crm, cp.op2);
+    match key {
+        // CNTP_CTL_EL0: arm/disarm the physical timer.
+        (3, 3, 14, 2, 1) => {
+            let pc = uc.pc_read().unwrap_or(0);
+            if is_read {
+                let enabled = state.timer_enabled.load(Ordering::Relaxed) as u64;
+                let _ = uc.reg_write(reg, enabled);
+            } else if let Ok(value) = uc.reg_read(reg) {
+                let enabled = value & 1 != 0;
+                state.timer_enabled.store(enabled, Ordering::Relaxed);
+                if enabled && state.timer_expired() {
+                    state.timer_pending.store(true, Ordering::Relaxed);
+                }
+            }
+            let _ = uc.set_pc(pc + 4);
+            return true;
+        }
+        // CNTP_CVAL_EL0: program the timer deadline.
+        (3, 3, 14, 2, 2) => {
+            let pc = uc.pc_read().unwrap_or(0);
+            if is_read {
+                let _ = uc.reg_write(reg, state.timer_deadline.load(Ordering::Relaxed));
+            } else if let Ok(value) = uc.reg_read(reg) {
+                state.timer_deadline.store(value, Ordering::Relaxed);
+                state.timer_pending.store(false, Ordering::Relaxed);
+                if state.timer_expired() {
+                    state.timer_pending.store(true, Ordering::Relaxed);
+                }
+            }
+            let _ = uc.set_pc(pc + 4);
+            return true;
+        }
+        // CNTP_TVAL_EL0: program a relative deadline.
+        (3, 3, 14, 2, 0) => {
+            if is_read {
+                let _ = uc.reg_write(reg, 0);
+            } else if let Ok(value) = uc.reg_read(reg) {
+                let deadline = state.counter_now().wrapping_add(value as u64);
+                state.timer_deadline.store(deadline, Ordering::Relaxed);
+                state.timer_pending.store(false, Ordering::Relaxed);
+                if state.timer_expired() {
+                    state.timer_pending.store(true, Ordering::Relaxed);
+                }
+            }
+            let pc = uc.pc_read().unwrap_or(0);
+            let _ = uc.set_pc(pc + 4);
+            return true;
+        }
+        // ICC_IAR1_EL1: acknowledge the highest-priority pending interrupt.
+        (3, 0, 12, 12, 0) => {
+            let irq = if state.timer_pending.swap(false, Ordering::Relaxed) {
+                TIMER_PPI
+            } else {
+                ICC_SPURIOUS
+            };
+            let _ = uc.reg_write(reg, irq);
+            let pc = uc.pc_read().unwrap_or(0);
+            let _ = uc.set_pc(pc + 4);
+            return true;
+        }
+        // ICC_EOIR1_EL1: end-of-interrupt; nothing further to track.
+        (3, 0, 12, 12, 1) => {
+            let pc = uc.pc_read().unwrap_or(0);
+            let _ = uc.set_pc(pc + 4);
+            return true;
+        }
+        _ => {}
+    }
+
     // Everything else: log each unique access site once, return an emulated
     // value for reads (zero for unknown registers), and skip the instruction.
     let pc = uc.pc_read().unwrap_or(0);
@@ -157,6 +271,10 @@ pub fn handle(
         } else {
             match key {
                 (3, 0, 0, 0, 0) => 0x410f_d821, // midr_el1 (Cortex-X4)
+                // id_aa64pfr0_el1: report GICv3 CPU interface (bits 27:24 = 1)
+                // so LK's GIC init proceeds instead of failing its version
+                // check and leaving max_irq = 0.
+                (3, 0, 0, 4, 0) => 0x0100_0000,
                 (3, 0, 0, 0, 5) => 0x8000_0000, // mpidr_el1 (primary CPU)
                 // currentel: derive from the live PSTATE (EL bits).
                 (3, 0, 4, 2, 2) => uc.reg_read(RegisterARM64::PSTATE).unwrap_or(0) & 0xc,
@@ -211,11 +329,23 @@ fn is_tpidr(key: (u32, u32, u32, u32, u32)) -> bool {
 /// Writes an AArch64 system register via Unicorn's CP_REG interface. The CP_REG
 /// buffer is 32 bytes: {crn, crm, op0, op1, op2} as u32s (20 bytes), 4 bytes of
 /// padding, then the 64-bit value.
-fn cp_reg_write(uc: &mut Unicorn<'_, ()>, crn: u32, crm: u32, op0: u32, op1: u32, op2: u32, value: u64) {
+pub fn cp_reg_write(uc: &mut Unicorn<'_, ()>, crn: u32, crm: u32, op0: u32, op1: u32, op2: u32, value: u64) {
     let mut cp = [0u8; 32];
     for (i, field) in [crn, crm, op0, op1, op2].iter().enumerate() {
         cp[i * 4..i * 4 + 4].copy_from_slice(&field.to_ne_bytes());
     }
     cp[24..32].copy_from_slice(&value.to_ne_bytes());
     let _ = uc.reg_write_long(RegisterARM64::CP_REG, &cp);
+}
+
+/// Reads an AArch64 system register via Unicorn's CP_REG interface. Unicorn
+/// requires the descriptor to be written to CP_REG first, then read back.
+pub fn cp_reg_read(uc: &mut Unicorn<'_, ()>, crn: u32, crm: u32, op0: u32, op1: u32, op2: u32) -> Option<u64> {
+    let mut cp = [0u8; 32];
+    for (i, field) in [crn, crm, op0, op1, op2].iter().enumerate() {
+        cp[i * 4..i * 4 + 4].copy_from_slice(&field.to_ne_bytes());
+    }
+    uc.reg_write_long(RegisterARM64::CP_REG, &cp).ok()?;
+    let buf = uc.reg_read_long(RegisterARM64::CP_REG).ok()?;
+    Some(u64::from_le_bytes(buf[24..32].try_into().unwrap()))
 }
